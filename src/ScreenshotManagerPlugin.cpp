@@ -298,6 +298,27 @@ namespace
                    : GAKU_E_INVALID_ARGUMENT;
     }
 
+    GakuStatus ApiArmPresentCapture(void* context, uint64_t token, uint32_t width, uint32_t height,
+        uint32_t pixelFormat)
+    {
+        auto* ctx = static_cast<PluginContext*>(context);
+        return ctx ? ctx->engine.ArmPresentCapture(token, width, height, pixelFormat) : GAKU_E_INVALID_ARGUMENT;
+    }
+
+    GakuStatus ApiConsumePresentCapture(void* context, uint64_t* outToken, void* outPixels, size_t capacity,
+        GakuScreenshotFrameInfoV1* outInfo, char* errorBuffer, uint32_t errorCapacity)
+    {
+        auto* ctx = static_cast<PluginContext*>(context);
+        return ctx ? ctx->engine.ConsumePresentCapture(outToken, outPixels, capacity, outInfo, errorBuffer, errorCapacity)
+                   : GAKU_E_INVALID_ARGUMENT;
+    }
+
+    GakuStatus ApiCancelPresentCapture(void* context)
+    {
+        auto* ctx = static_cast<PluginContext*>(context);
+        return ctx ? ctx->engine.CancelPresentCapture() : GAKU_E_INVALID_ARGUMENT;
+    }
+
     // ---- GakuWebPanelServiceV1 C ABI thunks --------------------------------
 
     GakuStatus ApiWebGetAssets(void* context, GakuWebPanelAssetsV1* output)
@@ -353,7 +374,7 @@ namespace
         const std::filesystem::path outDir = ScreenshotManager::PathFromUtf8(cfg.outputDirUtf8);
         if (outDir.empty())
         {
-            ctx->Log(GAKU_LOG_WARNING, "[ScreenshotManager] F11 hotkey skipped: output directory is invalid");
+            ctx->Log(GAKU_LOG_WARNING, "[ScreenshotManager] Hotkey F7 skipped: output directory is invalid");
             return;
         }
 
@@ -361,7 +382,7 @@ namespace
         std::filesystem::create_directories(outDir, ec);
         if (ec)
         {
-            ctx->Log(GAKU_LOG_WARNING, "[ScreenshotManager] F11 hotkey failed to create output directory");
+            ctx->Log(GAKU_LOG_WARNING, "[ScreenshotManager] Hotkey F7 failed to create output directory");
             return;
         }
 
@@ -369,7 +390,7 @@ namespace
         const std::string pathUtf8 = ScreenshotManager::PathToUtf8(filePath);
         if (pathUtf8.empty() || pathUtf8.size() >= 1024u)
         {
-            ctx->Log(GAKU_LOG_WARNING, "[ScreenshotManager] F11 hotkey skipped: generated path invalid");
+            ctx->Log(GAKU_LOG_WARNING, "[ScreenshotManager] Hotkey F7 skipped: generated path invalid");
             return;
         }
 
@@ -470,6 +491,9 @@ namespace
         ctx->captureService.pollCapture = &ApiPollCapture;
         ctx->captureService.releaseTicket = &ApiReleaseTicket;
         ctx->captureService.captureFrameImmediate = &ApiCaptureFrameImmediate;
+        ctx->captureService.armPresentCapture = &ApiArmPresentCapture;
+        ctx->captureService.consumePresentCapture = &ApiConsumePresentCapture;
+        ctx->captureService.cancelPresentCapture = &ApiCancelPresentCapture;
 
         const GakuStatus capReg = host->registerService(host->hostContext,
             GAKU_SERVICE_SCREENSHOT_CAPTURE, sizeof(GakuScreenshotServiceV1), &ctx->captureService);
@@ -546,7 +570,7 @@ namespace
         else
             ctx->Log(GAKU_LOG_WARNING, "[ScreenshotManager] Failed to register screenshotmanager.web-panel/v1");
 
-        // Optional foreground hotkey: VK_F11
+        // Optional foreground hotkey: VK_F7 (F11 belongs to GakuLocalify toggle-fullscreen)
         if (ctx->hotkeys.registerHotkey)
         {
             const GakuHotkeyBinding binding{
@@ -554,7 +578,7 @@ namespace
                 sizeof(GakuHotkeyBinding),
                 kTakeScreenshotActionId,
                 "ScreenshotManager: Capture Screenshot",
-                VK_F11,
+                VK_F7,
                 0u,
                 &TakeScreenshotHotkey,
                 ctx.get()
@@ -563,13 +587,13 @@ namespace
             if (hkStatus == GAKU_OK)
             {
                 ctx->hotkeyRegistered = true;
-                ctx->Log(GAKU_LOG_INFO, "[ScreenshotManager] Registered hotkey F11 (take-screenshot)");
+                ctx->Log(GAKU_LOG_INFO, "[ScreenshotManager] Registered hotkey F7 (take-screenshot)");
             }
             else
             {
                 char msg[160]{};
                 std::snprintf(msg, sizeof(msg),
-                    "[ScreenshotManager] Hotkey F11 registration skipped or conflicted (status=%d)", hkStatus);
+                    "[ScreenshotManager] Hotkey F7 registration skipped or conflicted (status=%d)", hkStatus);
                 ctx->Log(GAKU_LOG_WARNING, msg);
             }
         }

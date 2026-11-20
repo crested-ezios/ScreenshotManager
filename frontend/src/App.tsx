@@ -53,19 +53,19 @@ const PREVIEW_THEMES = [
 
 function BootScreen({ error, canReconnect }: { error: string | null; canReconnect: boolean }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-muted-foreground">
+    <div className="flex h-full min-h-full w-full flex-col items-center justify-center gap-4 bg-background p-6 text-muted-foreground">
       {error ? (
         <div className="flex max-w-md flex-col items-center gap-3 rounded-xl border bg-card/85 p-6 text-center shadow-sm">
           <div className="flex size-11 items-center justify-center rounded-full bg-destructive/15 text-destructive">
             <RiPlugFill className="size-5" />
           </div>
           <div className="space-y-1">
-            <p className="text-sm font-medium text-foreground">ScreenshotManager 原生桥接不可用</p>
-            <p className="text-xs leading-relaxed text-muted-foreground">{error}</p>
+            <p className="text-gaku-md font-medium text-foreground">ScreenshotManager 原生桥接不可用</p>
+            <p className="text-gaku-xs leading-relaxed text-muted-foreground">{error}</p>
           </div>
           {canReconnect && (
             <Button type="button" variant="outline" size="sm" onClick={() => void screenshotStore.restart()}>
-              <RiRefreshFill className="size-3.5" />
+              <RiRefreshFill className="size-4" />
               重新连接
             </Button>
           )}
@@ -73,7 +73,7 @@ function BootScreen({ error, canReconnect }: { error: string | null; canReconnec
       ) : (
         <div className="flex flex-col items-center gap-2.5">
           <RiLoader4Fill className="size-7 animate-spin text-primary" />
-          <p className="text-sm">正在连接 ScreenshotManager…</p>
+          <p className="text-gaku-base">正在连接 ScreenshotManager…</p>
         </div>
       )}
     </div>
@@ -88,11 +88,11 @@ function PreviewToolbar() {
   if (!mock) return null
   return (
     <div className="ml-auto flex flex-wrap items-center gap-2" data-testid="preview-toolbar">
-      <label className="flex items-center gap-1 text-xs">
+      <label className="flex items-center gap-1.5 text-gaku-xs">
         <span className="text-muted-foreground">主题</span>
         <select
           aria-label="预览主题"
-          className="h-6 rounded border bg-background px-1.5 text-xs text-foreground"
+          className="h-7 rounded border bg-background px-2 text-gaku-xs text-foreground"
           value={appearance.theme}
           onChange={(e) => mock.setAppearance(Number(e.target.value), appearance.uiScale)}
         >
@@ -107,7 +107,7 @@ function PreviewToolbar() {
         type="button"
         variant="outline"
         size="sm"
-        className="h-6 px-2 text-xs"
+        className="h-7 min-h-7 px-2.5 text-gaku-xs"
         onClick={() => mock.setGreenScreen(!greenScreen)}
       >
         {greenScreen ? '模拟关闭绿幕' : '模拟开启绿幕'}
@@ -190,11 +190,11 @@ export default function App() {
       {!ready || !connected ? (
         <BootScreen error={error ?? (ready ? '原生桥接已断开' : null)} canReconnect={ready} />
       ) : (
-        <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
+        <div className="flex h-full min-h-full w-full flex-col overflow-hidden bg-background text-foreground">
           {bridgeKind === 'mock' && (
-            <Alert variant="warning" className="rounded-none border-x-0 border-t-0 py-1.5" data-testid="mock-banner">
+            <Alert variant="warning" className="rounded-none border-x-0 border-t-0 py-2" data-testid="mock-banner">
               <RiFlaskFill className="size-4" />
-              <AlertDescription className="flex flex-wrap items-center gap-2 text-xs">
+              <AlertDescription className="flex flex-wrap items-center gap-2 text-gaku-xs">
                 <span>ScreenshotManager 预览模式（Mock Bridge）：本地模拟，不触发游戏渲染。</span>
                 {standalonePreview && <PreviewToolbar />}
               </AlertDescription>
@@ -202,14 +202,14 @@ export default function App() {
           )}
 
           {/* Header */}
-          <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b bg-card/70 px-5 py-3">
+          <header className="flex w-full shrink-0 flex-wrap items-center justify-between gap-3 border-b bg-card/70 px-5 py-3.5">
             <div className="flex items-center gap-3">
-              <div className="flex size-9 items-center justify-center rounded-lg bg-primary/15 text-primary">
+              <div className="flex size-10 items-center justify-center rounded-lg bg-primary/15 text-primary">
                 <RiCameraLensFill className="size-5" />
               </div>
               <div>
-                <div className="flex items-center gap-2">
-                  <h1 className="text-sm font-semibold tracking-tight">ScreenshotManager</h1>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-gaku-title font-semibold leading-tight tracking-tight">ScreenshotManager</h1>
                   <Badge
                     variant={capabilities.cameraAvailable ? 'success' : 'muted'}
                     data-testid="runtime-status-badge"
@@ -224,11 +224,11 @@ export default function App() {
                     variant={capabilities.greenScreenDetected ? 'success' : 'secondary'}
                     data-testid="greenscreen-badge"
                   >
-                    <RiSparkling2Fill className="size-3" />
+                    <RiSparkling2Fill className="size-3.5" />
                     {capabilities.greenScreenDetected ? 'GakuMotion 绿幕已激活' : 'GakuMotion 绿幕未开启'}
                   </Badge>
                 </div>
-                <p className="mt-0.5 text-xs text-muted-foreground">
+                <p className="mt-1 text-gaku-xs text-muted-foreground">
                   离屏多分辨率截图与绿幕透明 Alpha 抠像捕获
                   {capabilities.windowWidth > 0 && capabilities.windowHeight > 0
                     ? ` · 当前窗口 ${capabilities.windowWidth}×${capabilities.windowHeight}`
@@ -237,7 +237,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 variant="outline"
@@ -250,7 +250,6 @@ export default function App() {
               </Button>
               <Button
                 type="button"
-                size="sm"
                 disabled={busyCapture || !capabilities.cameraAvailable}
                 onClick={() => void screenshotStore.takeCapture()}
                 data-testid="capture-now-button"
@@ -260,14 +259,14 @@ export default function App() {
                 ) : (
                   <RiCameraLensFill className="size-4" />
                 )}
-                立即截图 (F11)
+                立即截图 (F7)
               </Button>
             </div>
           </header>
 
           {/* Main scrollable body */}
           <main className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-            <div className="mx-auto max-w-4xl space-y-4">
+            <div className="w-full space-y-4">
               {actionNotice && (
                 <Alert
                   variant={actionNotice.kind === 'error' ? 'destructive' : actionNotice.kind === 'success' ? 'info' : 'default'}
@@ -278,11 +277,11 @@ export default function App() {
                   ) : (
                     <RiCheckFill className="size-4" />
                   )}
-                  <AlertDescription className="flex items-center justify-between gap-2 text-xs">
-                    <span>{actionNotice.text}</span>
+                  <AlertDescription className="flex items-center justify-between gap-2 text-gaku-base">
+                    <span className="break-all">{actionNotice.text}</span>
                     <button
                       type="button"
-                      className="text-muted-foreground underline hover:text-foreground"
+                      className="shrink-0 text-gaku-sm text-muted-foreground underline hover:text-foreground"
                       onClick={() => screenshotStore.clearNotice()}
                     >
                       关闭
@@ -295,18 +294,18 @@ export default function App() {
                 {/* Resolution Card */}
                 <Card>
                   <CardHeader className="pb-3">
-                    <CardTitle className="flex items-center justify-between text-sm">
+                    <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-gaku-md">
                       <span className="inline-flex items-center gap-1.5">
                         <RiImage2Fill className="size-4 text-primary" />
                         输出分辨率
                       </span>
-                      <Badge variant="outline" className="font-mono text-[11px]" data-testid="active-resolution-badge">
+                      <Badge variant="outline" className="font-mono text-gaku-xs" data-testid="active-resolution-badge">
                         {config.width === 0
                           ? `窗口原生${effectiveWidth > 0 ? ` (${effectiveWidth}×${effectiveHeight})` : ''}`
                           : `${config.width}×${config.height}`}
                       </Badge>
                     </CardTitle>
-                    <CardDescription className="text-xs">
+                    <CardDescription className="text-gaku-xs">
                       独立离屏渲染，支持超分竖屏与 4K/8K 渲染（上限 {capabilities.maxDimension}px）
                     </CardDescription>
                   </CardHeader>
@@ -320,7 +319,7 @@ export default function App() {
                             type="button"
                             variant={selected ? 'default' : 'outline'}
                             size="sm"
-                            className="h-8 justify-center px-2 text-xs"
+                            className="justify-center px-2.5"
                             data-testid={`preset-${preset.id}`}
                             onClick={() => {
                               setCustomActive(false)
@@ -335,7 +334,7 @@ export default function App() {
                         type="button"
                         variant={activePresetId === 'custom' ? 'default' : 'outline'}
                         size="sm"
-                        className="h-8 justify-center px-2 text-xs sm:col-span-3"
+                        className="justify-center px-2.5 sm:col-span-3"
                         data-testid="preset-custom"
                         onClick={() => setCustomActive(true)}
                       >
@@ -345,11 +344,11 @@ export default function App() {
 
                     {(activePresetId === 'custom' || customActive) && (
                       <div
-                        className="flex flex-wrap items-end gap-2 rounded-md border bg-muted/40 p-2.5"
+                        className="flex flex-wrap items-end gap-2 rounded-md border bg-muted/40 p-3"
                         data-testid="custom-resolution-panel"
                       >
-                        <div className="min-w-[90px] flex-1 space-y-1">
-                          <Label htmlFor="custom-width" className="text-xs text-muted-foreground">
+                        <div className="min-w-[96px] flex-1 space-y-1.5">
+                          <Label htmlFor="custom-width" className="text-muted-foreground">
                             宽度 (W)
                           </Label>
                           <Input
@@ -358,7 +357,7 @@ export default function App() {
                             type="number"
                             min={1}
                             max={MAX_CAPTURE_DIMENSION}
-                            className="h-8 font-mono text-xs"
+                            className="font-mono"
                             value={customWidthText}
                             onChange={(e) => setCustomWidthText(e.target.value)}
                             onKeyDown={(e) => {
@@ -366,9 +365,9 @@ export default function App() {
                             }}
                           />
                         </div>
-                        <span className="pb-1.5 text-xs text-muted-foreground">×</span>
-                        <div className="min-w-[90px] flex-1 space-y-1">
-                          <Label htmlFor="custom-height" className="text-xs text-muted-foreground">
+                        <span className="pb-2 text-gaku-base text-muted-foreground">×</span>
+                        <div className="min-w-[96px] flex-1 space-y-1.5">
+                          <Label htmlFor="custom-height" className="text-muted-foreground">
                             高度 (H)
                           </Label>
                           <Input
@@ -377,7 +376,7 @@ export default function App() {
                             type="number"
                             min={1}
                             max={MAX_CAPTURE_DIMENSION}
-                            className="h-8 font-mono text-xs"
+                            className="font-mono"
                             value={customHeightText}
                             onChange={(e) => setCustomHeightText(e.target.value)}
                             onKeyDown={(e) => {
@@ -388,7 +387,6 @@ export default function App() {
                         <Button
                           type="button"
                           size="sm"
-                          className="h-8 text-xs"
                           data-testid="apply-custom-resolution"
                           onClick={handleApplyCustom}
                         >
@@ -398,7 +396,7 @@ export default function App() {
                     )}
 
                     {highResWarning && (
-                      <p className="rounded border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[11px] text-warning">
+                      <p className="rounded border border-warning/40 bg-warning/10 px-3 py-2 text-gaku-xs leading-relaxed text-warning">
                         高分辨率截图（4K 以上）将临时分配大尺寸离屏 RenderTexture 与 Staging Buffer。
                       </p>
                     )}
@@ -408,7 +406,7 @@ export default function App() {
                 {/* Format & Alpha Card */}
                 <Card>
                   <CardHeader className="pb-3">
-                    <CardTitle className="flex items-center justify-between text-sm">
+                    <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-gaku-md">
                       <span className="inline-flex items-center gap-1.5">
                         <RiPaletteFill className="size-4 text-primary" />
                         图像格式与透明通道
@@ -417,54 +415,54 @@ export default function App() {
                         {effectiveAlphaActive ? '当前输出: 透明 RGBA' : '当前输出: 不透明 RGB'}
                       </Badge>
                     </CardTitle>
-                    <CardDescription className="text-xs">
+                    <CardDescription className="text-gaku-xs">
                       PNG 支持 32-bit 直通透明通道；双通道差值抠像自动适配 ACES 色调映射
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3.5">
                     <div className="space-y-1.5">
-                      <Label htmlFor="alpha-mode-select" className="text-xs">
+                      <Label htmlFor="alpha-mode-select">
                         透明通道策略
                       </Label>
                       <Select
                         value={config.alphaMode}
                         onValueChange={(value) => void screenshotStore.setAlphaMode(value as AlphaMode)}
                       >
-                        <SelectTrigger id="alpha-mode-select" aria-label="透明通道策略" className="h-8 text-xs">
+                        <SelectTrigger id="alpha-mode-select" aria-label="透明通道策略">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
                           {ALPHA_MODE_OPTIONS.map((opt) => (
-                            <SelectItem key={opt.value} value={opt.value} className="text-xs">
+                            <SelectItem key={opt.value} value={opt.value}>
                               {opt.label}
                             </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
-                      <p className="text-[11px] text-muted-foreground">
+                      <p className="text-gaku-xs leading-relaxed text-muted-foreground">
                         {ALPHA_MODE_OPTIONS.find((o) => o.value === config.alphaMode)?.description}
                       </p>
                     </div>
 
                     <Separator />
 
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <div className="space-y-1.5">
-                        <Label htmlFor="format-select" className="text-xs">
+                        <Label htmlFor="format-select">
                           文件格式
                         </Label>
                         <Select
                           value={config.imageFormat}
                           onValueChange={(value) => void screenshotStore.setImageFormat(value as ImageFormat)}
                         >
-                          <SelectTrigger id="format-select" aria-label="文件格式" className="h-8 text-xs">
+                          <SelectTrigger id="format-select" aria-label="文件格式">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="png" className="text-xs">
+                            <SelectItem value="png">
                               PNG（无损 / 支持透明）
                             </SelectItem>
-                            <SelectItem value="jpeg" className="text-xs">
+                            <SelectItem value="jpeg">
                               JPEG（体积小 / 不含透明）
                             </SelectItem>
                           </SelectContent>
@@ -473,14 +471,14 @@ export default function App() {
 
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between">
-                          <Label className={cn('text-xs', config.imageFormat !== 'jpeg' && 'text-muted-foreground')}>
+                          <Label className={cn(config.imageFormat !== 'jpeg' && 'text-muted-foreground')}>
                             JPEG 质量
                           </Label>
-                          <span className="font-mono text-xs tabular-nums text-muted-foreground" data-testid="jpeg-quality-value">
+                          <span className="font-mono text-gaku-sm tabular-nums text-muted-foreground" data-testid="jpeg-quality-value">
                             {config.jpegQuality}%
                           </span>
                         </div>
-                        <div className="flex h-8 items-center">
+                        <div className="flex h-gaku-control items-center">
                           <Slider
                             aria-label="JPEG 质量"
                             min={1}
@@ -497,7 +495,7 @@ export default function App() {
                     </div>
 
                     {config.imageFormat === 'jpeg' && config.alphaMode !== 'opaque' && (
-                      <p className="text-[11px] text-warning">
+                      <p className="text-gaku-xs leading-relaxed text-warning">
                         JPEG 格式不支持 Alpha 透明通道，导出时将自动输出不透明 RGB 图像。
                       </p>
                     )}
@@ -508,16 +506,16 @@ export default function App() {
               {/* Output Folder Card */}
               <Card>
                 <CardHeader className="pb-2.5">
-                  <CardTitle className="text-sm">保存路径</CardTitle>
-                  <CardDescription className="text-xs">
-                    支持按 F11 快捷键或面板按钮自动命名保存（默认写入 GakuLoader UserData/Screenshots）
+                  <CardTitle className="text-gaku-md">保存路径</CardTitle>
+                  <CardDescription className="text-gaku-xs">
+                    支持按 F7 快捷键或面板按钮自动命名保存（默认写入 GakuLoader UserData/Screenshots）
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <div className="flex flex-wrap items-center gap-2">
                     <Input
                       aria-label="截图输出目录"
-                      className="h-8 min-w-[220px] flex-1 font-mono text-xs"
+                      className="min-w-[220px] flex-1 font-mono"
                       value={dirText}
                       onChange={(e) => setDirText(e.target.value)}
                       onBlur={handleApplyOutputDir}
@@ -529,23 +527,21 @@ export default function App() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-8 text-xs"
                       disabled={busyBrowse}
                       data-testid="browse-folder-button"
                       onClick={() => void screenshotStore.browseFolder()}
                     >
-                      <RiFileSearchFill className="size-3.5" />
+                      <RiFileSearchFill className="size-4" />
                       浏览…
                     </Button>
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-8 text-xs"
                       data-testid="open-folder-button"
                       onClick={() => void screenshotStore.openFolder()}
                     >
-                      <RiFolderOpenFill className="size-3.5" />
+                      <RiFolderOpenFill className="size-4" />
                       打开目录
                     </Button>
                   </div>
@@ -555,40 +551,40 @@ export default function App() {
               {/* Recent Captures List */}
               <Card>
                 <CardHeader className="pb-2.5">
-                  <CardTitle className="flex items-center justify-between text-sm">
+                  <CardTitle className="flex items-center justify-between text-gaku-md">
                     <span>最近截图记录</span>
-                    <span className="text-xs font-normal text-muted-foreground">
+                    <span className="text-gaku-xs font-normal text-muted-foreground">
                       共 {recentCaptures.length} 条
                     </span>
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
                   {recentCaptures.length === 0 ? (
-                    <div className="rounded-md border border-dashed py-6 text-center text-xs text-muted-foreground">
-                      暂无截图记录。点击右上角“立即截图 (F11)”或在游戏画面中按下 F11 开始捕获。
+                    <div className="rounded-md border border-dashed px-4 py-6 text-center text-gaku-base text-muted-foreground">
+                      暂无截图记录。点击右上角“立即截图 (F7)”或在游戏画面中按下 F7 开始捕获。
                     </div>
                   ) : (
                     <div className="divide-y rounded-md border" data-testid="recent-captures-list">
                       {recentCaptures.map((item) => (
                         <div
                           key={item.id}
-                          className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
+                          className="flex flex-wrap items-center justify-between gap-3 px-3.5 py-2.5 text-gaku-base"
                         >
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate font-mono font-medium text-foreground">{item.fileName}</div>
-                            <div className="truncate text-[11px] text-muted-foreground">{item.path}</div>
+                          <div className="min-w-0 flex-1 space-y-0.5">
+                            <div className="break-all font-mono text-gaku-base font-medium text-foreground">{item.fileName}</div>
+                            <div className="break-all font-mono text-gaku-xs text-muted-foreground">{item.path}</div>
                           </div>
-                          <div className="flex items-center gap-1.5">
-                            <Badge variant="outline" className="font-mono text-[11px]">
+                          <div className="flex shrink-0 flex-wrap items-center gap-2">
+                            <Badge variant="outline" className="font-mono text-gaku-micro">
                               {item.width}×{item.height}
                             </Badge>
-                            <Badge variant={item.hasAlpha ? 'success' : 'secondary'} className="text-[11px]">
+                            <Badge variant={item.hasAlpha ? 'success' : 'secondary'} className="text-gaku-micro">
                               {item.imageFormat.toUpperCase()} {item.hasAlpha ? 'RGBA' : 'RGB'}
                             </Badge>
-                            <span className="w-16 text-right font-mono text-[11px] text-muted-foreground tabular-nums">
+                            <span className="min-w-[4.5rem] text-right font-mono text-gaku-xs text-muted-foreground tabular-nums">
                               {formatFileSize(item.sizeBytes)}
                             </span>
-                            <span className="hidden text-[11px] text-muted-foreground sm:inline">
+                            <span className="hidden text-gaku-xs text-muted-foreground sm:inline">
                               {item.timestamp}
                             </span>
                           </div>

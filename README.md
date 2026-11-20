@@ -11,7 +11,7 @@ Independent GakuLoader v1 native plugin providing multi-resolution offscreen scr
 - **Public & Host Services**:
   - `screenshotmanager.capture/v1` (`include/GakuScreenshot.h`) for async ticketed file captures and synchronous `captureFrameImmediate` integration (e.g. `VideoExporter`).
   - `screenshotmanager.web-panel/v1` (`include/GakuWebPanel.h`) WebView2 control panel (`ScreenshotManager.UI`).
-  - Optional foreground hotkey `take-screenshot` (`VK_F11`).
+  - Optional foreground hotkey `take-screenshot` (`VK_F7`).
   - Lazy integration with `gakumotion.stage-state/v1` (`include/GakuMotionStageState.h`) to detect active GakuMotion Green Screen mode.
 
 ## Build & Offline Verification

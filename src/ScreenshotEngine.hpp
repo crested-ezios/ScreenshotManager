@@ -9,6 +9,7 @@
 #endif
 
 #include "../include/GakuPlugin.h"
+#include "../include/GakuMotionClock.h"
 #include "../include/GakuScreenshot.h"
 #include "../include/GakuMotionStageState.h"
 #include "AlphaMatte.hpp"
@@ -19,6 +20,9 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <wrl/client.h>
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
 
 #include <algorithm>
 #include <atomic>
@@ -69,6 +73,12 @@ namespace ScreenshotManager
         std::string errorMessage;
     };
 
+    struct PixelOrientation
+    {
+        bool flipHorizontal{false};
+        bool flipVertical{false};
+    };
+
     // Synthetic/headless render hook for offline tests without Unity/IL2CPP.
     // When set, ScreenshotEngine delegates frame capture to this callback.
     using TestRenderFn = std::function<bool(
@@ -77,7 +87,7 @@ namespace ScreenshotManager
         bool dualPassAlpha,
         std::vector<uint8_t>& outBlackRgba,
         std::vector<uint8_t>& outWhiteRgba,
-        bool& outFlipVertical,
+        PixelOrientation& outOrientation,
         std::string& outError)>;
 
     namespace Il2CppDetail
@@ -345,6 +355,15 @@ namespace ScreenshotManager
                     sizeof(logService_), &logService_);
                 host->queryService(host->hostContext, GAKU_SERVICE_MAIN_THREAD, GAKU_SERVICE_VERSION,
                     sizeof(mainThreadService_), &mainThreadService_);
+                GakuHookService hooks{};
+                if (host->queryService(host->hostContext, GAKU_SERVICE_HOOKS, GAKU_SERVICE_VERSION,
+                        sizeof(hooks), &hooks) == GAKU_OK &&
+                    hooks.abiVersion == GAKU_SERVICE_VERSION && hooks.structSize >= sizeof(GakuHookService) &&
+                    hooks.acquire && hooks.release)
+                {
+                    hookService_ = hooks;
+                    hookServiceCached_ = true;
+                }
             }
             else
             {
@@ -352,6 +371,10 @@ namespace ScreenshotManager
                 hostApiSet_ = false;
                 logService_ = {};
                 mainThreadService_ = {};
+                hookService_ = {};
+                hookServiceCached_ = false;
+                clockService_ = {};
+                clockServiceCached_ = false;
             }
         }
 
@@ -395,6 +418,7 @@ namespace ScreenshotManager
                 workerStarted_ = false;
                 encodeQueue_.clear();
             }
+            ReleasePresentHook();
             ReleaseGpuPools();
             runtimeReady_.store(false, std::memory_order_release);
         }
@@ -729,10 +753,10 @@ namespace ScreenshotManager
             }
 
             const bool useAlpha = ShouldCaptureAlpha(request->alphaMode);
-            bool flipVertical = false;
+            PixelOrientation orientation{};
             std::string captureError;
             if (!CaptureRawBuffers(targetW, targetH, useAlpha,
-                immediateBlack_, immediateWhite_, flipVertical, captureError))
+                immediateBlack_, immediateWhite_, orientation, captureError))
             {
                 setErr(captureError);
                 return GAKU_E_UNAVAILABLE;
@@ -743,12 +767,14 @@ namespace ScreenshotManager
             if (useAlpha)
             {
                 matteOk = AlphaMatte::ExtractAlphaDifferenceMatte(
-                    targetW, targetH, immediateBlack_.data(), immediateWhite_.data(), dst, flipVertical);
+                    targetW, targetH, immediateBlack_.data(), immediateWhite_.data(), dst,
+                    orientation.flipVertical, orientation.flipHorizontal);
             }
             else
             {
                 matteOk = AlphaMatte::CopyOpaqueToRgba(
-                    targetW, targetH, immediateBlack_.data(), flipVertical, dst);
+                    targetW, targetH, immediateBlack_.data(),
+                    orientation.flipVertical, dst, orientation.flipHorizontal);
             }
 
             if (!matteOk)
@@ -772,6 +798,123 @@ namespace ScreenshotManager
             info.unityFrame = ReadUnityFrameCount();
             *outInfo = info;
             return GAKU_OK;
+        }
+
+        GakuStatus ArmPresentCapture(uint64_t token, uint32_t width, uint32_t height, uint32_t pixelFormat)
+        {
+            if (token == 0 || !IsValidResolution(width, height, kMaxCaptureDimension))
+                return GAKU_E_INVALID_ARGUMENT;
+            if (pixelFormat != GAKU_PIXEL_RGBA8_SRGB_TOPDOWN &&
+                pixelFormat != GAKU_PIXEL_BGRA8_SRGB_TOPDOWN)
+                return GAKU_E_INVALID_ARGUMENT;
+            if (shuttingDown_.load(std::memory_order_acquire))
+                return GAKU_E_SHUTTING_DOWN;
+            if (!runtimeReady_.load(std::memory_order_acquire))
+                return GAKU_E_UNAVAILABLE;
+            if (!IsMainThread())
+                return GAKU_E_UNAVAILABLE;
+            if (!EnsurePresentHookInstalled())
+                return GAKU_E_UNAVAILABLE;
+
+            std::lock_guard<std::mutex> lock(presentMutex_);
+            presentArmedToken_ = token;
+            presentArmedW_ = width;
+            presentArmedH_ = height;
+            presentArmedFormat_ = pixelFormat;
+            presentReadyToken_ = 0;
+            presentFailedToken_ = 0;
+            presentActive_.store(true, std::memory_order_release);
+            return GAKU_OK;
+        }
+
+        GakuStatus ConsumePresentCapture(uint64_t* outToken, void* outPixels, size_t capacity,
+            GakuScreenshotFrameInfoV1* outInfo, char* errorBuffer, uint32_t errorCapacity)
+        {
+            auto setErr = [&](const std::string& msg) {
+                if (errorBuffer && errorCapacity > 0)
+                    CopyCString(errorBuffer, errorCapacity, msg);
+            };
+            if (!outToken || !outInfo)
+            {
+                setErr("Invalid outToken or outInfo argument");
+                return GAKU_E_INVALID_ARGUMENT;
+            }
+            if (outInfo->structSize != 0 && outInfo->structSize < sizeof(GakuScreenshotFrameInfoV1))
+            {
+                setErr("outInfo structSize is too small");
+                return GAKU_E_SIZE;
+            }
+            *outToken = 0;
+            if (shuttingDown_.load(std::memory_order_acquire))
+            {
+                setErr("ScreenshotManager is shutting down");
+                return GAKU_E_SHUTTING_DOWN;
+            }
+
+            std::lock_guard<std::mutex> lock(presentMutex_);
+            if (presentFailedToken_ != 0)
+            {
+                const std::string err = presentLastError_.empty() ? "Present backbuffer capture failed" : presentLastError_;
+                presentFailedToken_ = 0;
+                presentReadyToken_ = 0;
+                presentActive_.store(presentArmedToken_ != 0, std::memory_order_release);
+                setErr(err);
+                return GAKU_E_UNAVAILABLE;
+            }
+            if (presentReadyToken_ == 0)
+            {
+                return GAKU_OK; // Still waiting for IDXGISwapChain::Present
+            }
+
+            const size_t pitch = static_cast<size_t>(presentReadyW_) * 4u;
+            const size_t needed = pitch * static_cast<size_t>(presentReadyH_);
+            GakuScreenshotFrameInfoV1 info{};
+            info.abiVersion = GAKU_SCREENSHOT_VERSION;
+            info.structSize = sizeof(GakuScreenshotFrameInfoV1);
+            info.width = presentReadyW_;
+            info.height = presentReadyH_;
+            info.rowPitch = static_cast<uint32_t>(pitch);
+            info.hasAlpha = 0u;
+            info.unityFrame = presentReadyUnityFrame_;
+            *outInfo = info;
+
+            if (!outPixels || capacity < needed)
+            {
+                setErr("Output pixel buffer capacity is too small");
+                return GAKU_E_SIZE;
+            }
+
+            std::memcpy(outPixels, presentReadyPixels_.data(), needed);
+            *outToken = presentReadyToken_;
+            presentReadyToken_ = 0;
+            presentActive_.store(presentArmedToken_ != 0, std::memory_order_release);
+            return GAKU_OK;
+        }
+
+        GakuStatus CancelPresentCapture()
+        {
+            std::lock_guard<std::mutex> lock(presentMutex_);
+            presentArmedToken_ = 0;
+            presentReadyToken_ = 0;
+            presentFailedToken_ = 0;
+            presentActive_.store(false, std::memory_order_release);
+            return GAKU_OK;
+        }
+
+        static constexpr PixelOrientation OffscreenRenderOrientation() noexcept
+        {
+            return PixelOrientation{false, true};
+        }
+
+        void SetTestPresentHookOverride(bool enabled) noexcept
+        {
+            testPresentOverride_.store(enabled, std::memory_order_release);
+        }
+
+        bool SimulatePresentBackbufferForTest(uint32_t width, uint32_t height, DXGI_FORMAT fmt,
+            const uint8_t* srcBase, size_t srcRowPitch, uint64_t unityFrame = 1u)
+        {
+            return ProcessPresentBackbufferPixels(width, height, fmt, srcBase, srcRowPitch, unityFrame);
         }
 
         // ---- Recent captures & UI status inspection --------------------------
@@ -803,6 +946,67 @@ namespace ScreenshotManager
             outInFlight = outPendingCount > 0;
         }
 
+        // Unpacks mapped D3D11 texture rows into tightly packed RGBA8 buffer (preserving source pixel orientation).
+        static bool UnpackDxgiPixelsToRgba(DXGI_FORMAT copyFmt, uint32_t width, uint32_t height,
+            const uint8_t* srcBase, size_t srcRowPitch, std::vector<uint8_t>& outRgba)
+        {
+            if (!srcBase || width == 0 || height == 0) return false;
+            const size_t w = static_cast<size_t>(width);
+            const size_t h = static_cast<size_t>(height);
+            if (w > (SIZE_MAX / 8u) / h) return false;
+            const size_t rowBytes = w * 4u;
+            const size_t minPitch = (copyFmt == DXGI_FORMAT_R16G16B16A16_FLOAT) ? (w * 8u) : rowBytes;
+            if (srcRowPitch < minPitch) return false;
+
+            outRgba.resize(rowBytes * h);
+            if (copyFmt == DXGI_FORMAT_R8G8B8A8_UNORM || copyFmt == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+            {
+                for (uint32_t y = 0; y < height; ++y)
+                {
+                    std::memcpy(outRgba.data() + static_cast<size_t>(y) * rowBytes,
+                        srcBase + static_cast<size_t>(y) * srcRowPitch, rowBytes);
+                }
+                return true;
+            }
+            if (copyFmt == DXGI_FORMAT_B8G8R8A8_UNORM || copyFmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+            {
+                for (uint32_t y = 0; y < height; ++y)
+                {
+                    const uint8_t* sRow = srcBase + static_cast<size_t>(y) * srcRowPitch;
+                    uint8_t* dRow = outRgba.data() + static_cast<size_t>(y) * rowBytes;
+                    for (uint32_t x = 0; x < width; ++x)
+                    {
+                        const size_t idx = static_cast<size_t>(x) * 4u;
+                        dRow[idx + 0] = sRow[idx + 2];
+                        dRow[idx + 1] = sRow[idx + 1];
+                        dRow[idx + 2] = sRow[idx + 0];
+                        dRow[idx + 3] = sRow[idx + 3];
+                    }
+                }
+                return true;
+            }
+            if (copyFmt == DXGI_FORMAT_R16G16B16A16_FLOAT)
+            {
+                for (uint32_t y = 0; y < height; ++y)
+                {
+                    const uint16_t* sRow = reinterpret_cast<const uint16_t*>(
+                        srcBase + static_cast<size_t>(y) * srcRowPitch);
+                    uint8_t* dRow = outRgba.data() + static_cast<size_t>(y) * rowBytes;
+                    for (uint32_t x = 0; x < width; ++x)
+                    {
+                        const size_t idx = static_cast<size_t>(x) * 4u;
+                        dRow[idx + 0] = LinearToSrgbByte(HalfToFloat(sRow[idx + 0]));
+                        dRow[idx + 1] = LinearToSrgbByte(HalfToFloat(sRow[idx + 1]));
+                        dRow[idx + 2] = LinearToSrgbByte(HalfToFloat(sRow[idx + 2]));
+                        const float a = std::clamp(HalfToFloat(sRow[idx + 3]), 0.0f, 1.0f);
+                        dRow[idx + 3] = static_cast<uint8_t>(std::lround(a * 255.0f));
+                    }
+                }
+                return true;
+            }
+            return false;
+        }
+
     private:
         struct TicketState
         {
@@ -829,7 +1033,7 @@ namespace ScreenshotManager
             uint32_t width{0};
             uint32_t height{0};
             bool useAlpha{false};
-            bool flipVertical{false};
+            PixelOrientation orientation{};
             std::vector<uint8_t> blackRgba;
             std::vector<uint8_t> whiteRgba;
         };
@@ -1334,19 +1538,116 @@ namespace ScreenshotManager
             }
         }
 
+        struct D3D11ReadbackPool
+        {
+            Microsoft::WRL::ComPtr<ID3D11Device> device;
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> stagingTex;
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> resolveTex;
+            uint32_t stagingW{0}, stagingH{0};
+            DXGI_FORMAT stagingFmt{DXGI_FORMAT_UNKNOWN};
+            uint32_t resolveW{0}, resolveH{0};
+            DXGI_FORMAT resolveFmt{DXGI_FORMAT_UNKNOWN};
+
+            void Release()
+            {
+                stagingTex.Reset();
+                resolveTex.Reset();
+                device.Reset();
+                stagingW = stagingH = 0;
+                stagingFmt = DXGI_FORMAT_UNKNOWN;
+                resolveW = resolveH = 0;
+                resolveFmt = DXGI_FORMAT_UNKNOWN;
+            }
+        };
+
         void ReleaseGpuPools()
         {
-            stagingTex_.Reset();
-            resolveTex_.Reset();
-            stagingDevice_.Reset();
-            stagingW_ = stagingH_ = 0;
-            stagingFmt_ = DXGI_FORMAT_UNKNOWN;
-            resolveW_ = resolveH_ = 0;
-            resolveFmt_ = DXGI_FORMAT_UNKNOWN;
+            offscreenPool_.Release();
+        }
+
+        static bool ReadbackD3D11TextureToRgba(ID3D11Texture2D* srcTex, uint32_t expectedW, uint32_t expectedH,
+            D3D11ReadbackPool& pool, std::vector<uint8_t>& outRgba, DXGI_FORMAT* outCopyFormat = nullptr)
+        {
+            if (!srcTex) return false;
+            D3D11_TEXTURE2D_DESC desc{};
+            srcTex->GetDesc(&desc);
+            if (desc.Width != expectedW || desc.Height != expectedH || !IsSupportedDxgiFormat(desc.Format))
+                return false;
+
+            Microsoft::WRL::ComPtr<ID3D11Device> device;
+            srcTex->GetDevice(device.GetAddressOf());
+            if (!device) return false;
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
+            device->GetImmediateContext(ctx.GetAddressOf());
+            if (!ctx) return false;
+
+            const DXGI_FORMAT copyFmt = ResolveCopyFormat(desc.Format);
+            ID3D11Texture2D* copySrc = srcTex;
+
+            if (desc.SampleDesc.Count > 1u)
+            {
+                if (!pool.resolveTex || pool.device.Get() != device.Get() ||
+                    pool.resolveW != expectedW || pool.resolveH != expectedH || pool.resolveFmt != copyFmt)
+                {
+                    pool.resolveTex.Reset();
+                    D3D11_TEXTURE2D_DESC rDesc{};
+                    rDesc.Width = expectedW;
+                    rDesc.Height = expectedH;
+                    rDesc.MipLevels = 1;
+                    rDesc.ArraySize = 1;
+                    rDesc.Format = copyFmt;
+                    rDesc.SampleDesc.Count = 1;
+                    rDesc.Usage = D3D11_USAGE_DEFAULT;
+                    if (FAILED(device->CreateTexture2D(&rDesc, nullptr, pool.resolveTex.GetAddressOf())))
+                        return false;
+                    pool.resolveW = expectedW;
+                    pool.resolveH = expectedH;
+                    pool.resolveFmt = copyFmt;
+                }
+                ctx->ResolveSubresource(pool.resolveTex.Get(), 0, srcTex, 0, copyFmt);
+                copySrc = pool.resolveTex.Get();
+            }
+
+            if (!pool.stagingTex || pool.device.Get() != device.Get() ||
+                pool.stagingW != expectedW || pool.stagingH != expectedH || pool.stagingFmt != copyFmt)
+            {
+                pool.stagingTex.Reset();
+                if (pool.device.Get() != device.Get()) pool.resolveTex.Reset();
+                pool.device = device;
+                D3D11_TEXTURE2D_DESC sDesc{};
+                sDesc.Width = expectedW;
+                sDesc.Height = expectedH;
+                sDesc.MipLevels = 1;
+                sDesc.ArraySize = 1;
+                sDesc.Format = copyFmt;
+                sDesc.SampleDesc.Count = 1;
+                sDesc.Usage = D3D11_USAGE_STAGING;
+                sDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                if (FAILED(device->CreateTexture2D(&sDesc, nullptr, pool.stagingTex.GetAddressOf())))
+                {
+                    pool.Release();
+                    return false;
+                }
+                pool.stagingW = expectedW;
+                pool.stagingH = expectedH;
+                pool.stagingFmt = copyFmt;
+            }
+
+            ctx->CopySubresourceRegion(pool.stagingTex.Get(), 0, 0, 0, 0, copySrc, 0, nullptr);
+
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (FAILED(ctx->Map(pool.stagingTex.Get(), 0, D3D11_MAP_READ, 0, &mapped)) || !mapped.pData)
+                return false;
+
+            const bool unpacked = UnpackDxgiPixelsToRgba(
+                copyFmt, expectedW, expectedH, static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch, outRgba);
+            ctx->Unmap(pool.stagingTex.Get(), 0);
+            if (outCopyFormat) *outCopyFormat = copyFmt;
+            return unpacked;
         }
 
         bool ReadbackTextureD3D11(void* rt, uint32_t width, uint32_t height,
-            std::vector<uint8_t>& outRgba, bool& outFlipVertical)
+            std::vector<uint8_t>& outRgba, PixelOrientation& outOrientation)
         {
             if (!rt || !mTexGetNativePtr_) return false;
             void* nativePtr = nullptr;
@@ -1364,132 +1665,17 @@ namespace ScreenshotManager
                 if (!res || FAILED(res.As(&srcTex)))
                     return false;
             }
-            if (!srcTex) return false;
-
-            D3D11_TEXTURE2D_DESC desc{};
-            srcTex->GetDesc(&desc);
-            if (desc.Width != width || desc.Height != height || !IsSupportedDxgiFormat(desc.Format))
+            if (!ReadbackD3D11TextureToRgba(srcTex.Get(), width, height, offscreenPool_, outRgba))
                 return false;
 
-            Microsoft::WRL::ComPtr<ID3D11Device> device;
-            srcTex->GetDevice(device.GetAddressOf());
-            if (!device) return false;
-            Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
-            device->GetImmediateContext(ctx.GetAddressOf());
-            if (!ctx) return false;
-
-            const DXGI_FORMAT copyFmt = ResolveCopyFormat(desc.Format);
-            ID3D11Texture2D* copySrc = srcTex.Get();
-
-            if (desc.SampleDesc.Count > 1u)
-            {
-                if (!resolveTex_ || stagingDevice_.Get() != device.Get() ||
-                    resolveW_ != width || resolveH_ != height || resolveFmt_ != copyFmt)
-                {
-                    resolveTex_.Reset();
-                    D3D11_TEXTURE2D_DESC rDesc{};
-                    rDesc.Width = width;
-                    rDesc.Height = height;
-                    rDesc.MipLevels = 1;
-                    rDesc.ArraySize = 1;
-                    rDesc.Format = copyFmt;
-                    rDesc.SampleDesc.Count = 1;
-                    rDesc.Usage = D3D11_USAGE_DEFAULT;
-                    if (FAILED(device->CreateTexture2D(&rDesc, nullptr, resolveTex_.GetAddressOf())))
-                        return false;
-                    resolveW_ = width;
-                    resolveH_ = height;
-                    resolveFmt_ = copyFmt;
-                }
-                ctx->ResolveSubresource(resolveTex_.Get(), 0, srcTex.Get(), 0, copyFmt);
-                copySrc = resolveTex_.Get();
-            }
-
-            if (!stagingTex_ || stagingDevice_.Get() != device.Get() ||
-                stagingW_ != width || stagingH_ != height || stagingFmt_ != copyFmt)
-            {
-                stagingTex_.Reset();
-                if (stagingDevice_.Get() != device.Get()) resolveTex_.Reset();
-                stagingDevice_ = device;
-                D3D11_TEXTURE2D_DESC sDesc{};
-                sDesc.Width = width;
-                sDesc.Height = height;
-                sDesc.MipLevels = 1;
-                sDesc.ArraySize = 1;
-                sDesc.Format = copyFmt;
-                sDesc.SampleDesc.Count = 1;
-                sDesc.Usage = D3D11_USAGE_STAGING;
-                sDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-                if (FAILED(device->CreateTexture2D(&sDesc, nullptr, stagingTex_.GetAddressOf())))
-                {
-                    ReleaseGpuPools();
-                    return false;
-                }
-                stagingW_ = width;
-                stagingH_ = height;
-                stagingFmt_ = copyFmt;
-            }
-
-            ctx->CopySubresourceRegion(stagingTex_.Get(), 0, 0, 0, 0, copySrc, 0, nullptr);
-
-            D3D11_MAPPED_SUBRESOURCE mapped{};
-            if (FAILED(ctx->Map(stagingTex_.Get(), 0, D3D11_MAP_READ, 0, &mapped)) || !mapped.pData)
-                return false;
-
-            outRgba.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
-            const uint8_t* srcBase = static_cast<const uint8_t*>(mapped.pData);
-
-            if (copyFmt == DXGI_FORMAT_R8G8B8A8_UNORM || copyFmt == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
-            {
-                const size_t rowBytes = static_cast<size_t>(width) * 4u;
-                for (uint32_t y = 0; y < height; ++y)
-                {
-                    std::memcpy(outRgba.data() + static_cast<size_t>(y) * rowBytes,
-                        srcBase + static_cast<size_t>(y) * mapped.RowPitch, rowBytes);
-                }
-            }
-            else if (copyFmt == DXGI_FORMAT_B8G8R8A8_UNORM || copyFmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
-            {
-                for (uint32_t y = 0; y < height; ++y)
-                {
-                    const uint8_t* sRow = srcBase + static_cast<size_t>(y) * mapped.RowPitch;
-                    uint8_t* dRow = outRgba.data() + static_cast<size_t>(y) * width * 4u;
-                    for (uint32_t x = 0; x < width; ++x)
-                    {
-                        const size_t idx = static_cast<size_t>(x) * 4u;
-                        dRow[idx + 0] = sRow[idx + 2];
-                        dRow[idx + 1] = sRow[idx + 1];
-                        dRow[idx + 2] = sRow[idx + 0];
-                        dRow[idx + 3] = sRow[idx + 3];
-                    }
-                }
-            }
-            else if (copyFmt == DXGI_FORMAT_R16G16B16A16_FLOAT)
-            {
-                for (uint32_t y = 0; y < height; ++y)
-                {
-                    const uint16_t* sRow = reinterpret_cast<const uint16_t*>(
-                        srcBase + static_cast<size_t>(y) * mapped.RowPitch);
-                    uint8_t* dRow = outRgba.data() + static_cast<size_t>(y) * width * 4u;
-                    for (uint32_t x = 0; x < width; ++x)
-                    {
-                        const size_t idx = static_cast<size_t>(x) * 4u;
-                        dRow[idx + 0] = LinearToSrgbByte(HalfToFloat(sRow[idx + 0]));
-                        dRow[idx + 1] = LinearToSrgbByte(HalfToFloat(sRow[idx + 1]));
-                        dRow[idx + 2] = LinearToSrgbByte(HalfToFloat(sRow[idx + 2]));
-                        const float a = std::clamp(HalfToFloat(sRow[idx + 3]), 0.0f, 1.0f);
-                        dRow[idx + 3] = static_cast<uint8_t>(std::lround(a * 255.0f));
-                    }
-                }
-            }
-
-            ctx->Unmap(stagingTex_.Get(), 0);
-            outFlipVertical = false;
+            // Unity Camera.Render() into a RenderTexture on D3D11 produces bottom-up rows
+            // (vertically flipped relative to upright top-down, with un-mirrored columns).
+            outOrientation = OffscreenRenderOrientation();
             return true;
         }
 
         bool ReadbackTexture2DFallback(void* rt, uint32_t width, uint32_t height,
-            std::vector<uint8_t>& outRgba, bool& outFlipVertical)
+            std::vector<uint8_t>& outRgba, PixelOrientation& outOrientation)
         {
             if (!rt || !texture2DClass_ || !il2cpp_.objectNew || !il2cpp_.arrayLength ||
                 !mRtGetActive_ || !mRtSetActive_ || !mTex2DGetRawBytes_)
@@ -1584,19 +1770,20 @@ namespace ScreenshotManager
             const uint8_t* rawBytes = reinterpret_cast<const uint8_t*>(static_cast<const char*>(byteArr) + 32);
             outRgba.resize(expectedBytes);
             std::memcpy(outRgba.data(), rawBytes, expectedBytes);
-            outFlipVertical = true;
+            // Texture2D.GetRawTextureData() returns bottom-up rows with un-mirrored columns.
+            outOrientation = OffscreenRenderOrientation();
             return true;
         }
 
         bool CaptureRawBuffers(uint32_t width, uint32_t height, bool dualPassAlpha,
             std::vector<uint8_t>& outBlack, std::vector<uint8_t>& outWhite,
-            bool& outFlipVertical, std::string& outError)
+            PixelOrientation& outOrientation, std::string& outError)
         {
             {
                 std::lock_guard<std::mutex> lock(testMutex_);
                 if (testRender_)
                 {
-                    return testRender_(width, height, dualPassAlpha, outBlack, outWhite, outFlipVertical, outError);
+                    return testRender_(width, height, dualPassAlpha, outBlack, outWhite, outOrientation, outError);
                 }
             }
 
@@ -1614,6 +1801,13 @@ namespace ScreenshotManager
             }
             t_capturing = true;
             struct ReentrancyReset { ~ReentrancyReset() { t_capturing = false; } } reentrancyReset;
+
+            BeginOffscreenCaptureIfAvailable();
+            struct OffscreenGuard
+            {
+                ScreenshotEngine& engine;
+                ~OffscreenGuard() { engine.EndOffscreenCaptureIfAvailable(); }
+            } offscreenGuard{*this};
 
             void* cam = il2cpp_.Invoke(mCameraGetMain_);
             if (!cam || !IsUnityAlive(cam))
@@ -1777,21 +1971,21 @@ namespace ScreenshotManager
                 il2cpp_.InvokeVoid(mCameraSetAspect_, cam, aArgs);
             }
 
-            auto renderAndRead = [&](std::vector<uint8_t>& outPixels, bool& flip) -> bool {
+            auto renderAndRead = [&](std::vector<uint8_t>& outPixels, PixelOrientation& orient) -> bool {
                 if (!il2cpp_.InvokeVoid(mCameraRender_, cam))
                 {
                     outError = "Camera.Render raised an exception";
                     return false;
                 }
-                if (ReadbackTextureD3D11(rt, width, height, outPixels, flip)) return true;
-                if (ReadbackTexture2DFallback(rt, width, height, outPixels, flip)) return true;
+                if (ReadbackTextureD3D11(rt, width, height, outPixels, orient)) return true;
+                if (ReadbackTexture2DFallback(rt, width, height, outPixels, orient)) return true;
                 outError = "GPU texture readback failed";
                 return false;
             };
 
             if (!dualPassAlpha)
             {
-                return renderAndRead(outBlack, outFlipVertical);
+                return renderAndRead(outBlack, outOrientation);
             }
 
             int solidFlags = enumClearSolidColor_;
@@ -1808,8 +2002,8 @@ namespace ScreenshotManager
                 outError = "Camera.set_backgroundColor(black) failed";
                 return false;
             }
-            bool flipBlack = false;
-            if (!renderAndRead(outBlack, flipBlack)) return false;
+            PixelOrientation orientBlack{};
+            if (!renderAndRead(outBlack, orientBlack)) return false;
 
             const UnityColor whiteClear{1.0f, 1.0f, 1.0f, 0.0f};
             if (!WriteCameraBackgroundColor(cam, whiteClear))
@@ -1817,19 +2011,30 @@ namespace ScreenshotManager
                 outError = "Camera.set_backgroundColor(white) failed";
                 return false;
             }
-            bool flipWhite = false;
-            if (!renderAndRead(outWhite, flipWhite)) return false;
+            PixelOrientation orientWhite{};
+            if (!renderAndRead(outWhite, orientWhite)) return false;
 
-            if (flipBlack != flipWhite)
+            if (orientBlack.flipVertical != orientWhite.flipVertical)
             {
                 // Normalize orientation if readback paths somehow differed between passes.
-                if (flipBlack) FlipRgbaRows(width, height, outBlack);
-                if (flipWhite) FlipRgbaRows(width, height, outWhite);
-                outFlipVertical = false;
+                if (orientBlack.flipVertical) FlipRgbaRows(width, height, outBlack);
+                if (orientWhite.flipVertical) FlipRgbaRows(width, height, outWhite);
+                outOrientation.flipVertical = false;
             }
             else
             {
-                outFlipVertical = flipBlack;
+                outOrientation.flipVertical = orientBlack.flipVertical;
+            }
+
+            if (orientBlack.flipHorizontal != orientWhite.flipHorizontal)
+            {
+                if (orientBlack.flipHorizontal) FlipRgbaCols(width, height, outBlack);
+                if (orientWhite.flipHorizontal) FlipRgbaCols(width, height, outWhite);
+                outOrientation.flipHorizontal = false;
+            }
+            else
+            {
+                outOrientation.flipHorizontal = orientBlack.flipHorizontal;
             }
             return true;
         }
@@ -1845,6 +2050,24 @@ namespace ScreenshotManager
                 std::memcpy(tmp.data(), top, rowBytes);
                 std::memcpy(top, bot, rowBytes);
                 std::memcpy(bot, tmp.data(), rowBytes);
+            }
+        }
+
+        static void FlipRgbaCols(uint32_t width, uint32_t height, std::vector<uint8_t>& pixels)
+        {
+            const size_t rowBytes = static_cast<size_t>(width) * 4u;
+            for (uint32_t y = 0; y < height; ++y)
+            {
+                uint8_t* row = pixels.data() + static_cast<size_t>(y) * rowBytes;
+                for (uint32_t x = 0; x < width / 2u; ++x)
+                {
+                    uint8_t* left = row + static_cast<size_t>(x) * 4u;
+                    uint8_t* right = row + static_cast<size_t>(width - 1u - x) * 4u;
+                    for (size_t c = 0; c < 4u; ++c)
+                    {
+                        std::swap(left[c], right[c]);
+                    }
+                }
             }
         }
 
@@ -1880,7 +2103,7 @@ namespace ScreenshotManager
                 job.useAlpha = wantAlpha;
 
                 std::string capErr;
-                if (!CaptureRawBuffers(w, h, wantAlpha, job.blackRgba, job.whiteRgba, job.flipVertical, capErr))
+                if (!CaptureRawBuffers(w, h, wantAlpha, job.blackRgba, job.whiteRgba, job.orientation, capErr))
                 {
                     FailTicket(*ticket, GAKU_E_UNAVAILABLE, capErr);
                     continue;
@@ -1948,13 +2171,13 @@ namespace ScreenshotManager
                 {
                     converted = AlphaMatte::ExtractAlphaDifferenceMatte(
                         job.width, job.height, job.blackRgba.data(), job.whiteRgba.data(),
-                        finalRgba.data(), job.flipVertical);
+                        finalRgba.data(), job.orientation.flipVertical, job.orientation.flipHorizontal);
                 }
                 else
                 {
                     converted = AlphaMatte::CopyOpaqueToRgba(
                         job.width, job.height, job.blackRgba.data(),
-                        job.flipVertical, finalRgba.data());
+                        job.orientation.flipVertical, finalRgba.data(), job.orientation.flipHorizontal);
                 }
 
                 if (!converted)
@@ -2044,6 +2267,330 @@ namespace ScreenshotManager
         GakuMainThreadService mainThreadService_{};
         GakuMotionStageStateServiceV1 stageStateService_{};
         bool stageStateCached_{false};
+        GakuHookService hookService_{};
+        bool hookServiceCached_{false};
+        GakuMotionClockServiceV1 clockService_{};
+        bool clockServiceCached_{false};
+
+        // IDXGISwapChain::Present capture state
+        using PresentFn = HRESULT (STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
+        static inline std::atomic<ScreenshotEngine*> s_presentEngine_{nullptr};
+        static inline std::atomic<PresentFn> s_origPresent_{nullptr};
+
+        static HWND FindUnityMainWindow()
+        {
+            HWND hwnd = nullptr;
+            const DWORD pid = GetCurrentProcessId();
+            while ((hwnd = FindWindowExW(nullptr, hwnd, L"UnityWndClass", nullptr)) != nullptr)
+            {
+                DWORD winPid = 0;
+                GetWindowThreadProcessId(hwnd, &winPid);
+                if (winPid == pid) return hwnd;
+            }
+            return nullptr;
+        }
+
+        static HRESULT STDMETHODCALLTYPE DetourPresent(IDXGISwapChain* sc, UINT syncInterval, UINT flags)
+        {
+            if (ScreenshotEngine* engine = s_presentEngine_.load(std::memory_order_acquire))
+            {
+                engine->OnSwapChainPresent(sc);
+            }
+            const PresentFn orig = s_origPresent_.load(std::memory_order_acquire);
+            return orig ? orig(sc, syncInterval, flags) : S_OK;
+        }
+
+        bool QueryClockCaptureGuard(GakuMotionClockServiceV1& out)
+        {
+            std::lock_guard<std::mutex> lock(hostMutex_);
+            if (clockServiceCached_)
+            {
+                out = clockService_;
+                return true;
+            }
+            if (!hostApiSet_ || !hostApi_.queryService) return false;
+            GakuMotionClockServiceV1 svc{};
+            if (hostApi_.queryService(hostApi_.hostContext, GAKU_SERVICE_MOTION_CLOCK,
+                    GAKU_MOTION_CLOCK_VERSION, sizeof(svc), &svc) != GAKU_OK)
+                return false;
+            if (svc.abiVersion != GAKU_MOTION_CLOCK_VERSION ||
+                svc.structSize < offsetof(GakuMotionClockServiceV1, endOffscreenCapture) + sizeof(svc.endOffscreenCapture) ||
+                !svc.beginOffscreenCapture || !svc.endOffscreenCapture)
+                return false;
+            clockService_ = svc;
+            clockServiceCached_ = true;
+            out = svc;
+            return true;
+        }
+
+        void BeginOffscreenCaptureIfAvailable()
+        {
+            GakuMotionClockServiceV1 svc{};
+            if (QueryClockCaptureGuard(svc)) svc.beginOffscreenCapture(svc.context);
+        }
+
+        void EndOffscreenCaptureIfAvailable()
+        {
+            GakuMotionClockServiceV1 svc{};
+            if (QueryClockCaptureGuard(svc)) svc.endOffscreenCapture(svc.context);
+        }
+
+        bool EnsurePresentHookInstalled()
+        {
+            if (testPresentOverride_.load(std::memory_order_acquire)) return true;
+            if (presentHookInstalled_.load(std::memory_order_acquire)) return true;
+            std::lock_guard<std::mutex> lock(presentHookMutex_);
+            if (presentHookInstalled_.load(std::memory_order_acquire)) return true;
+            if (presentHookFailed_.load(std::memory_order_acquire)) return false;
+
+            GakuHookService hooks{};
+            {
+                std::lock_guard<std::mutex> hLock(hostMutex_);
+                if (!hookServiceCached_ || !hookService_.acquire || !hookService_.release)
+                {
+                    presentHookFailed_.store(true, std::memory_order_release);
+                    return false;
+                }
+                hooks = hookService_;
+            }
+
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = L"GakuScreenshotDummyDxgi";
+            RegisterClassW(&wc);
+            HWND dummyHwnd = CreateWindowExW(0, L"GakuScreenshotDummyDxgi", L"", WS_OVERLAPPEDWINDOW,
+                0, 0, 8, 8, nullptr, nullptr, wc.hInstance, nullptr);
+            if (!dummyHwnd)
+            {
+                presentHookFailed_.store(true, std::memory_order_release);
+                return false;
+            }
+
+            DXGI_SWAP_CHAIN_DESC sd{};
+            sd.BufferCount = 1;
+            sd.BufferDesc.Width = 8;
+            sd.BufferDesc.Height = 8;
+            sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            sd.OutputWindow = dummyHwnd;
+            sd.SampleDesc.Count = 1;
+            sd.Windowed = TRUE;
+            sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+            Microsoft::WRL::ComPtr<IDXGISwapChain> dummySc;
+            Microsoft::WRL::ComPtr<ID3D11Device> dummyDev;
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext> dummyCtx;
+            D3D_FEATURE_LEVEL fl{};
+            HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                nullptr, 0, D3D11_SDK_VERSION, &sd, dummySc.GetAddressOf(), dummyDev.GetAddressOf(), &fl,
+                dummyCtx.GetAddressOf());
+            if (FAILED(hr))
+            {
+                hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                    nullptr, 0, D3D11_SDK_VERSION, &sd, dummySc.GetAddressOf(), dummyDev.GetAddressOf(), &fl,
+                    dummyCtx.GetAddressOf());
+            }
+
+            void* target = nullptr;
+            if (SUCCEEDED(hr) && dummySc)
+            {
+                void** vtbl = *reinterpret_cast<void***>(dummySc.Get());
+                if (vtbl) target = vtbl[8]; // IDXGISwapChain::Present
+            }
+            dummyCtx.Reset();
+            dummyDev.Reset();
+            dummySc.Reset();
+            DestroyWindow(dummyHwnd);
+            UnregisterClassW(wc.lpszClassName, wc.hInstance);
+
+            if (!target)
+            {
+                presentHookFailed_.store(true, std::memory_order_release);
+                LogWarning("[ScreenshotManager] Failed to resolve IDXGISwapChain::Present");
+                return false;
+            }
+
+            s_presentEngine_.store(this, std::memory_order_release);
+            void* orig = nullptr;
+            const GakuStatus st = hooks.acquire(hooks.context, target,
+                reinterpret_cast<void*>(&DetourPresent), &orig);
+            if (st != GAKU_OK || !orig)
+            {
+                if (s_presentEngine_.load(std::memory_order_acquire) == this)
+                    s_presentEngine_.store(nullptr, std::memory_order_release);
+                presentHookFailed_.store(true, std::memory_order_release);
+                LogWarning(("[ScreenshotManager] Failed to acquire IDXGISwapChain::Present hook (status=" +
+                    std::to_string(st) + ")").c_str());
+                return false;
+            }
+            s_origPresent_.store(reinterpret_cast<PresentFn>(orig), std::memory_order_release);
+            presentTarget_ = target;
+            presentHookInstalled_.store(true, std::memory_order_release);
+            LogInfo("[ScreenshotManager] IDXGISwapChain::Present backbuffer hook installed");
+            return true;
+        }
+
+        void ReleasePresentHook()
+        {
+            std::lock_guard<std::mutex> lock(presentHookMutex_);
+            presentActive_.store(false, std::memory_order_release);
+            if (s_presentEngine_.load(std::memory_order_acquire) == this)
+                s_presentEngine_.store(nullptr, std::memory_order_release);
+            if (presentHookInstalled_.load(std::memory_order_acquire) && presentTarget_ &&
+                hookServiceCached_ && hookService_.release)
+            {
+                hookService_.release(hookService_.context, presentTarget_);
+            }
+            presentTarget_ = nullptr;
+            presentHookInstalled_.store(false, std::memory_order_release);
+            std::lock_guard<std::mutex> pLock(presentMutex_);
+            presentPool_.Release();
+            presentArmedToken_ = 0;
+            presentReadyToken_ = 0;
+            presentFailedToken_ = 0;
+        }
+
+        void OnSwapChainPresent(IDXGISwapChain* sc)
+        {
+            if (!sc || shuttingDown_.load(std::memory_order_acquire) ||
+                !presentActive_.load(std::memory_order_acquire))
+                return;
+
+            DXGI_SWAP_CHAIN_DESC desc{};
+            if (FAILED(sc->GetDesc(&desc)) || !desc.OutputWindow) return;
+
+            HWND expectedHwnd = unityHwnd_.load(std::memory_order_acquire);
+            if (!expectedHwnd || !IsWindow(expectedHwnd))
+            {
+                expectedHwnd = FindUnityMainWindow();
+                if (expectedHwnd) unityHwnd_.store(expectedHwnd, std::memory_order_release);
+            }
+            if (!expectedHwnd || desc.OutputWindow != expectedHwnd) return;
+
+            uint32_t expectedW = 0, expectedH = 0;
+            {
+                std::lock_guard<std::mutex> lock(presentMutex_);
+                if (presentArmedToken_ == 0) return;
+                expectedW = presentArmedW_;
+                expectedH = presentArmedH_;
+                if (desc.BufferDesc.Width != expectedW || desc.BufferDesc.Height != expectedH)
+                {
+                    presentFailedToken_ = presentArmedToken_;
+                    presentArmedToken_ = 0;
+                    presentLastError_ = "Swapchain backbuffer size does not match requested resolution";
+                    presentActive_.store(false, std::memory_order_release);
+                    return;
+                }
+            }
+
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> backbuf;
+            if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                    reinterpret_cast<void**>(backbuf.GetAddressOf()))) || !backbuf)
+                return;
+
+            std::lock_guard<std::mutex> lock(presentMutex_);
+            if (presentArmedToken_ == 0 || presentArmedW_ != expectedW || presentArmedH_ != expectedH)
+                return;
+
+            const uint64_t token = presentArmedToken_;
+            if (!ReadbackD3D11TextureToRgba(backbuf.Get(), expectedW, expectedH, presentPool_, presentRawScratch_))
+            {
+                presentFailedToken_ = token;
+                presentArmedToken_ = 0;
+                presentLastError_ = "Swapchain D3D11 backbuffer readback failed";
+                presentActive_.store(false, std::memory_order_release);
+                return;
+            }
+            if (!PublishPresentConvertedLocked(token, expectedW, expectedH, ReadUnityFrameCountSafeFallback()))
+            {
+                presentFailedToken_ = token;
+                presentArmedToken_ = 0;
+                presentLastError_ = "Swapchain backbuffer pixel conversion failed";
+                presentActive_.store(false, std::memory_order_release);
+            }
+        }
+
+        uint64_t ReadUnityFrameCountSafeFallback() const
+        {
+            // Safe across threads: cachedWindow or incremented frame index without calling IL2CPP from GfxWorker.
+            return presentUnitySeq_.fetch_add(1, std::memory_order_relaxed) + 1u;
+        }
+
+        bool ProcessPresentBackbufferPixels(uint32_t width, uint32_t height, DXGI_FORMAT fmt,
+            const uint8_t* srcBase, size_t srcRowPitch, uint64_t unityFrame)
+        {
+            std::lock_guard<std::mutex> lock(presentMutex_);
+            if (presentArmedToken_ == 0) return false;
+            const uint64_t token = presentArmedToken_;
+            if (width != presentArmedW_ || height != presentArmedH_)
+            {
+                presentFailedToken_ = token;
+                presentArmedToken_ = 0;
+                presentLastError_ = "Swapchain backbuffer size does not match requested resolution";
+                presentActive_.store(false, std::memory_order_release);
+                return false;
+            }
+            const DXGI_FORMAT copyFmt = ResolveCopyFormat(fmt);
+            if (!IsSupportedDxgiFormat(fmt) ||
+                !UnpackDxgiPixelsToRgba(copyFmt, width, height, srcBase, srcRowPitch, presentRawScratch_))
+            {
+                presentFailedToken_ = token;
+                presentArmedToken_ = 0;
+                presentLastError_ = "Unsupported swapchain pixel format";
+                presentActive_.store(false, std::memory_order_release);
+                return false;
+            }
+            return PublishPresentConvertedLocked(token, width, height, unityFrame);
+        }
+
+        bool PublishPresentConvertedLocked(uint64_t token, uint32_t width, uint32_t height, uint64_t unityFrame)
+        {
+            const size_t totalBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+            presentReadyPixels_.resize(totalBytes);
+            // Swapchain backbuffer rows on DX11 are upright top-down (no vertical RenderTexture flip).
+            if (!AlphaMatte::CopyOpaqueToRgba(
+                    width, height, presentRawScratch_.data(), false, presentReadyPixels_.data(), false))
+                return false;
+            if (presentArmedFormat_ == GAKU_PIXEL_BGRA8_SRGB_TOPDOWN)
+            {
+                AlphaMatte::RgbaToBgra(width, height, presentReadyPixels_.data(), presentReadyPixels_.data());
+            }
+            presentReadyToken_ = token;
+            presentReadyW_ = width;
+            presentReadyH_ = height;
+            presentReadyFormat_ = presentArmedFormat_;
+            presentReadyUnityFrame_ = unityFrame;
+            presentArmedToken_ = 0;
+            presentFailedToken_ = 0;
+            presentActive_.store(false, std::memory_order_release);
+            return true;
+        }
+
+        std::mutex presentHookMutex_;
+        std::atomic<bool> presentHookInstalled_{false};
+        std::atomic<bool> presentHookFailed_{false};
+        std::atomic<bool> testPresentOverride_{false};
+        std::atomic<bool> presentActive_{false};
+        std::atomic<HWND> unityHwnd_{nullptr};
+        mutable std::atomic<uint64_t> presentUnitySeq_{0};
+        void* presentTarget_{nullptr};
+
+        std::mutex presentMutex_;
+        D3D11ReadbackPool presentPool_;
+        std::vector<uint8_t> presentRawScratch_;
+        std::vector<uint8_t> presentReadyPixels_;
+        uint64_t presentArmedToken_{0};
+        uint32_t presentArmedW_{0};
+        uint32_t presentArmedH_{0};
+        uint32_t presentArmedFormat_{GAKU_PIXEL_RGBA8_SRGB_TOPDOWN};
+        uint64_t presentReadyToken_{0};
+        uint32_t presentReadyW_{0};
+        uint32_t presentReadyH_{0};
+        uint32_t presentReadyFormat_{GAKU_PIXEL_RGBA8_SRGB_TOPDOWN};
+        uint64_t presentReadyUnityFrame_{0};
+        uint64_t presentFailedToken_{0};
+        std::string presentLastError_;
 
         // Runtime & capabilities state
         std::atomic<bool> shuttingDown_{false};
@@ -2143,13 +2690,7 @@ namespace ScreenshotManager
         const void* mCamDataSetRenderScale_{nullptr};
 
         // Pooled GPU & immediate readback buffers (Unity main thread only)
-        Microsoft::WRL::ComPtr<ID3D11Device> stagingDevice_;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> stagingTex_;
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> resolveTex_;
-        uint32_t stagingW_{0}, stagingH_{0};
-        DXGI_FORMAT stagingFmt_{DXGI_FORMAT_UNKNOWN};
-        uint32_t resolveW_{0}, resolveH_{0};
-        DXGI_FORMAT resolveFmt_{DXGI_FORMAT_UNKNOWN};
+        D3D11ReadbackPool offscreenPool_;
         std::vector<uint8_t> immediateBlack_;
         std::vector<uint8_t> immediateWhite_;
 

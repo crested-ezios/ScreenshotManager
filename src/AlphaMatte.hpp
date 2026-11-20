@@ -25,29 +25,43 @@ namespace ScreenshotManager::AlphaMatte
         return static_cast<uint8_t>(std::clamp(rounded, 0L, 255L));
     }
 
+    namespace detail
+    {
+        template <typename PixelFn>
+        inline void TransformRgbaGrid(uint32_t width, uint32_t height,
+            bool flipVertical, bool flipHorizontal, PixelFn&& fn) noexcept
+        {
+            for (uint32_t y = 0; y < height; ++y)
+            {
+                const uint32_t srcY = flipVertical ? (height - 1u - y) : y;
+                const size_t srcRow = static_cast<size_t>(srcY) * width * 4u;
+                const size_t dstRow = static_cast<size_t>(y) * width * 4u;
+                for (uint32_t x = 0; x < width; ++x)
+                {
+                    const uint32_t srcX = flipHorizontal ? (width - 1u - x) : x;
+                    const size_t s = srcRow + static_cast<size_t>(srcX) * 4u;
+                    const size_t d = dstRow + static_cast<size_t>(x) * 4u;
+                    fn(s, d);
+                }
+            }
+        }
+    } // namespace detail
+
     // Copies RGBA8 pixels into top-down RGBA8 with opaque alpha (A = 255).
-    // Safe when srcRgba == outRgba if flipVertical == false.
+    // Safe when srcRgba == outRgba only if !flipVertical && !flipHorizontal.
     inline bool CopyOpaqueToRgba(uint32_t width, uint32_t height, const uint8_t* srcRgba,
-        bool flipVertical, uint8_t* outRgba) noexcept
+        bool flipVertical, uint8_t* outRgba, bool flipHorizontal = false) noexcept
     {
         size_t pixelCount = 0;
         if (!srcRgba || !outRgba || !ValidateDimensions(width, height, pixelCount)) return false;
 
-        for (uint32_t y = 0; y < height; ++y)
-        {
-            const uint32_t srcY = flipVertical ? (height - 1u - y) : y;
-            const size_t srcRow = static_cast<size_t>(srcY) * width * 4u;
-            const size_t dstRow = static_cast<size_t>(y) * width * 4u;
-            for (uint32_t x = 0; x < width; ++x)
-            {
-                const size_t s = srcRow + static_cast<size_t>(x) * 4u;
-                const size_t d = dstRow + static_cast<size_t>(x) * 4u;
+        detail::TransformRgbaGrid(width, height, flipVertical, flipHorizontal,
+            [&](size_t s, size_t d) noexcept {
                 outRgba[d + 0] = srcRgba[s + 0];
                 outRgba[d + 1] = srcRgba[s + 1];
                 outRgba[d + 2] = srcRgba[s + 2];
                 outRgba[d + 3] = 255u;
-            }
-        }
+            });
         return true;
     }
 
@@ -72,21 +86,15 @@ namespace ScreenshotManager::AlphaMatte
     }
 
     // Unpremultiplies hardware-alpha RGBA8 pixels into straight top-down RGBA8.
+    // Safe when srcPixels == outRgba only if !flipVertical && !flipHorizontal.
     inline bool UnpremultiplyAndConvertToRgba(uint32_t width, uint32_t height, const uint8_t* srcPixels,
-        bool flipVertical, uint8_t* outRgba) noexcept
+        bool flipVertical, uint8_t* outRgba, bool flipHorizontal = false) noexcept
     {
         size_t pixelCount = 0;
         if (!srcPixels || !outRgba || !ValidateDimensions(width, height, pixelCount)) return false;
 
-        for (uint32_t y = 0; y < height; ++y)
-        {
-            const uint32_t srcY = flipVertical ? (height - 1u - y) : y;
-            const size_t srcRow = static_cast<size_t>(srcY) * width * 4u;
-            const size_t dstRow = static_cast<size_t>(y) * width * 4u;
-            for (uint32_t x = 0; x < width; ++x)
-            {
-                const size_t s = srcRow + static_cast<size_t>(x) * 4u;
-                const size_t d = dstRow + static_cast<size_t>(x) * 4u;
+        detail::TransformRgbaGrid(width, height, flipVertical, flipHorizontal,
+            [&](size_t s, size_t d) noexcept {
                 const uint8_t r = srcPixels[s + 0];
                 const uint8_t g = srcPixels[s + 1];
                 const uint8_t b = srcPixels[s + 2];
@@ -114,8 +122,7 @@ namespace ScreenshotManager::AlphaMatte
                     outRgba[d + 2] = ClampByte(static_cast<double>(b) * invA);
                     outRgba[d + 3] = a;
                 }
-            }
-        }
+            });
         return true;
     }
 
@@ -124,7 +131,7 @@ namespace ScreenshotManager::AlphaMatte
     // then computes per-pixel alpha and recovers straight unpremultiplied foreground RGB from blackRgba.
     inline bool ExtractAlphaDifferenceMatte(uint32_t width, uint32_t height,
         const uint8_t* blackRgba, const uint8_t* whiteRgba,
-        uint8_t* outStraightRgba, bool flipVertical) noexcept
+        uint8_t* outStraightRgba, bool flipVertical, bool flipHorizontal = false) noexcept
     {
         size_t pixelCount = 0;
         if (!blackRgba || !whiteRgba || !outStraightRgba || !ValidateDimensions(width, height, pixelCount))
@@ -169,16 +176,8 @@ namespace ScreenshotManager::AlphaMatte
         constexpr double kHighSnap = 253.0 / 255.0;
         constexpr double kMinDenom = 1.0 / 255.0;
 
-        for (uint32_t y = 0; y < height; ++y)
-        {
-            const uint32_t srcY = flipVertical ? (height - 1u - y) : y;
-            const size_t srcRow = static_cast<size_t>(srcY) * width * 4u;
-            const size_t dstRow = static_cast<size_t>(y) * width * 4u;
-            for (uint32_t x = 0; x < width; ++x)
-            {
-                const size_t s = srcRow + static_cast<size_t>(x) * 4u;
-                const size_t d = dstRow + static_cast<size_t>(x) * 4u;
-
+        detail::TransformRgbaGrid(width, height, flipVertical, flipHorizontal,
+            [&](size_t s, size_t d) noexcept {
                 const double br = static_cast<double>(blackRgba[s + 0]) / 255.0;
                 const double bg = static_cast<double>(blackRgba[s + 1]) / 255.0;
                 const double bb = static_cast<double>(blackRgba[s + 2]) / 255.0;
@@ -196,7 +195,7 @@ namespace ScreenshotManager::AlphaMatte
                     outStraightRgba[d + 1] = 0u;
                     outStraightRgba[d + 2] = 0u;
                     outStraightRgba[d + 3] = 0u;
-                    continue;
+                    return;
                 }
 
                 uint8_t outAlpha = 255u;
@@ -215,8 +214,7 @@ namespace ScreenshotManager::AlphaMatte
                 outStraightRgba[d + 1] = ClampByte(bg / denom);
                 outStraightRgba[d + 2] = ClampByte(bb / denom);
                 outStraightRgba[d + 3] = outAlpha;
-            }
-        }
+            });
         return true;
     }
 } // namespace ScreenshotManager::AlphaMatte

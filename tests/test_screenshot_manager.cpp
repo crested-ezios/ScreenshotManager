@@ -371,6 +371,52 @@ namespace
         Check(fpx[0] == 210 && fpx[1] == 80 && fpx[2] == 40 && fpx[3] == 255,
             "flipVertical=true maps row 1 to row 2");
 
+        // Flip horizontal check (col 1 -> col W - 1 - 1 = 6)
+        std::vector<uint8_t> hFlipped(W * H * 4, 0);
+        Check(ExtractAlphaDifferenceMatte(W, H, black.data(), white.data(), hFlipped.data(), false, true),
+            "ExtractAlphaDifferenceMatte flipHorizontal=true succeeded");
+        const uint8_t* hpx = &hFlipped[(static_cast<size_t>(1) * W + 6) * 4u];
+        Check(hpx[0] == 210 && hpx[1] == 80 && hpx[2] == 40 && hpx[3] == 255,
+            "flipHorizontal=true maps (1,1) to (6,1)");
+
+        // 180-degree dual-axis flip (flipVertical=true, flipHorizontal=true): (1,1) -> (6,2), (3,1) -> (4,2)
+        std::vector<uint8_t> rot180(W * H * 4, 0);
+        Check(ExtractAlphaDifferenceMatte(W, H, black.data(), white.data(), rot180.data(), true, true),
+            "ExtractAlphaDifferenceMatte dual-axis 180 flip succeeded");
+        const uint8_t* rpx1 = &rot180[(static_cast<size_t>(2) * W + 6) * 4u];
+        const uint8_t* rpx3 = &rot180[(static_cast<size_t>(2) * W + 4) * 4u];
+        const uint8_t* rbg = &rot180[(static_cast<size_t>(0) * W + 0) * 4u];
+        Check(rpx1[0] == 210 && rpx1[1] == 80 && rpx1[2] == 40 && rpx1[3] == 255,
+            "180-degree flip maps opaque (1,1) to (6,2)");
+        Check(NearByte(rpx3[3], 128, 1) && NearByte(rpx3[0], 220, 2) &&
+            NearByte(rpx3[1], 140, 2) && NearByte(rpx3[2], 80, 2),
+            "180-degree flip maps semi-transparent (3,1) to (4,2) with straight RGB");
+        Check(rbg[0] == 0 && rbg[1] == 0 && rbg[2] == 0 && rbg[3] == 0,
+            "180-degree flip preserves transparent background");
+
+        // CopyOpaqueToRgba vertical-only flip (flipVertical=true, flipHorizontal=false):
+        // source bottom-left (0, H-1) -> output top-left (0, 0), NOT (W-1, 0).
+        std::vector<uint8_t> opaqueSrc = {
+            10, 20, 30, 0,   40, 50, 60, 100,  70, 80, 90, 200,
+            110, 120, 130, 50,  140, 150, 160, 150,  170, 180, 190, 255
+        };
+        std::vector<uint8_t> opaqueVertOut(3 * 2 * 4, 0);
+        Check(CopyOpaqueToRgba(3, 2, opaqueSrc.data(), true, opaqueVertOut.data(), false),
+            "CopyOpaqueToRgba vertical-only flip succeeded");
+        Check(opaqueVertOut[0] == 110 && opaqueVertOut[1] == 120 && opaqueVertOut[2] == 130 && opaqueVertOut[3] == 255 &&
+            opaqueVertOut[2 * 4 + 0] == 170 && opaqueVertOut[2 * 4 + 1] == 180 && opaqueVertOut[2 * 4 + 2] == 190 &&
+            opaqueVertOut[(1 * 3 + 0) * 4 + 0] == 10 && opaqueVertOut[(1 * 3 + 2) * 4 + 0] == 70,
+            "CopyOpaqueToRgba vertical-only flip maps bottom-left (0,1) to top-left (0,0) without horizontal mirror");
+
+        // CopyOpaqueToRgba 180-degree flip check
+        std::vector<uint8_t> opaqueOut(3 * 2 * 4, 0);
+        Check(CopyOpaqueToRgba(3, 2, opaqueSrc.data(), true, opaqueOut.data(), true),
+            "CopyOpaqueToRgba dual-axis 180 flip succeeded");
+        Check(opaqueOut[0] == 170 && opaqueOut[1] == 180 && opaqueOut[2] == 190 && opaqueOut[3] == 255 &&
+            opaqueOut[(1 * 3 + 2) * 4 + 0] == 10 && opaqueOut[(1 * 3 + 2) * 4 + 1] == 20 &&
+            opaqueOut[(1 * 3 + 2) * 4 + 2] == 30 && opaqueOut[(1 * 3 + 2) * 4 + 3] == 255,
+            "CopyOpaqueToRgba 180 flip swaps corners and forces A=255");
+
         // Floor ceilDelta >= 16/255 safety test
         std::vector<uint8_t> lowBlack(4 * 4, 0);
         std::vector<uint8_t> lowWhite(4 * 4, 0);
@@ -381,20 +427,99 @@ namespace
             "Floor ceilDelta avoids divide-by-zero");
         Check(lowOut[3] > 0 && lowOut[3] < 255, "10/255 delta against 16/255 floor gives partial alpha");
 
-        // UnpremultiplyAndConvertToRgba & RgbaToBgra
-        const uint8_t premul[8] = {100, 50, 25, 128, 0, 0, 0, 0};
-        uint8_t unpremul[8]{};
-        Check(UnpremultiplyAndConvertToRgba(2, 1, premul, false, unpremul),
+        // UnpremultiplyAndConvertToRgba (including 180-degree flip) & RgbaToBgra
+        const uint8_t premul[16] = {
+            100, 50, 25, 128,   0, 0, 0, 0,
+            10, 20, 30, 255,    40, 80, 120, 255
+        };
+        uint8_t unpremul[16]{};
+        Check(UnpremultiplyAndConvertToRgba(2, 2, premul, false, unpremul),
             "UnpremultiplyAndConvertToRgba succeeded");
         Check(NearByte(unpremul[0], 199, 1) && NearByte(unpremul[1], 100, 1) && NearByte(unpremul[2], 50, 1) && unpremul[3] == 128,
             "Unpremultiply recovers straight RGB from premultiplied pixel");
         Check(unpremul[4] == 0 && unpremul[5] == 0 && unpremul[6] == 0 && unpremul[7] == 0,
             "Unpremultiply clears A=0 RGB to zero");
 
-        uint8_t bgra[8]{};
-        Check(RgbaToBgra(2, 1, unpremul, bgra), "RgbaToBgra succeeded");
+        uint8_t unpremul180[16]{};
+        Check(UnpremultiplyAndConvertToRgba(2, 2, premul, true, unpremul180, true),
+            "UnpremultiplyAndConvertToRgba 180 flip succeeded");
+        Check(unpremul180[0] == 40 && unpremul180[1] == 80 && unpremul180[2] == 120 && unpremul180[3] == 255 &&
+            NearByte(unpremul180[12], 199, 1) && NearByte(unpremul180[13], 100, 1) &&
+            NearByte(unpremul180[14], 50, 1) && unpremul180[15] == 128,
+            "Unpremultiply 180 flip swaps corners while recovering straight RGB");
+
+        uint8_t bgra[16]{};
+        Check(RgbaToBgra(2, 2, unpremul, bgra), "RgbaToBgra succeeded");
         Check(bgra[0] == unpremul[2] && bgra[1] == unpremul[1] && bgra[2] == unpremul[0] && bgra[3] == unpremul[3],
             "RgbaToBgra swaps R and B");
+    }
+
+    // ---- Test 1b: DXGI RowPitch Unpack & Format Parity ---------------------
+
+    void TestDxgiRowPitchUnpack()
+    {
+        BeginTest("DXGI RowPitch Unpack & RGBA/BGRA/FP16 Parity");
+        using ScreenshotManager::ScreenshotEngine;
+
+        constexpr uint32_t W = 3;
+        constexpr uint32_t H = 2;
+
+        // 3 pixels * 4 bytes = 12 bytes/row, padded to 24 bytes RowPitch with 0xAA sentinel bytes.
+        constexpr size_t kPitch4 = 24;
+        std::vector<uint8_t> rgbaSrc(kPitch4 * H, 0xAA);
+        std::vector<uint8_t> bgraSrc(kPitch4 * H, 0xAA);
+        for (uint32_t y = 0; y < H; ++y)
+        {
+            for (uint32_t x = 0; x < W; ++x)
+            {
+                const uint8_t r = static_cast<uint8_t>(20 + y * 60 + x * 15);
+                const uint8_t g = static_cast<uint8_t>(40 + y * 50 + x * 10);
+                const uint8_t b = static_cast<uint8_t>(80 + y * 40 + x * 20);
+                const uint8_t a = static_cast<uint8_t>(200 + x * 10);
+                const size_t s = static_cast<size_t>(y) * kPitch4 + static_cast<size_t>(x) * 4u;
+                rgbaSrc[s + 0] = r; rgbaSrc[s + 1] = g; rgbaSrc[s + 2] = b; rgbaSrc[s + 3] = a;
+                bgraSrc[s + 0] = b; bgraSrc[s + 1] = g; bgraSrc[s + 2] = r; bgraSrc[s + 3] = a;
+            }
+        }
+
+        std::vector<uint8_t> outRgba;
+        std::vector<uint8_t> outFromBgra;
+        Check(ScreenshotEngine::UnpackDxgiPixelsToRgba(
+            DXGI_FORMAT_R8G8B8A8_UNORM, W, H, rgbaSrc.data(), kPitch4, outRgba),
+            "UnpackDxgiPixelsToRgba R8G8B8A8_UNORM with padded RowPitch succeeded");
+        Check(ScreenshotEngine::UnpackDxgiPixelsToRgba(
+            DXGI_FORMAT_B8G8R8A8_UNORM, W, H, bgraSrc.data(), kPitch4, outFromBgra),
+            "UnpackDxgiPixelsToRgba B8G8R8A8_UNORM with padded RowPitch succeeded");
+        Check(outRgba.size() == W * H * 4u && outRgba == outFromBgra,
+            "BGRA8 and RGBA8 padded RowPitch unpack produce byte-identical RGBA8 buffers");
+        Check(outRgba[(1 * W + 2) * 4 + 0] == 110 && outRgba[(1 * W + 2) * 4 + 2] == 160,
+            "Padded RowPitch offset skips stride padding bytes accurately");
+
+        // R16G16B16A16_FLOAT (8 bytes/px = 24 bytes/row, padded to 32 bytes RowPitch)
+        constexpr size_t kPitch8 = 32;
+        std::vector<uint8_t> fp16Src(kPitch8 * H, 0x55);
+        auto setFp16Px = [&](uint32_t x, uint32_t y, uint16_t hr, uint16_t hg, uint16_t hb, uint16_t ha) {
+            uint16_t* p = reinterpret_cast<uint16_t*>(fp16Src.data() + static_cast<size_t>(y) * kPitch8 + static_cast<size_t>(x) * 8u);
+            p[0] = hr; p[1] = hg; p[2] = hb; p[3] = ha;
+        };
+        // 0x3C00 = 1.0, 0x0000 = 0.0, 0x3800 = 0.5 (linear 0.5 -> sRGB ~0.735 -> ~187)
+        setFp16Px(0, 0, 0x3C00, 0x0000, 0x3800, 0x3C00);
+        setFp16Px(2, 1, 0x0000, 0x3C00, 0x0000, 0x3800);
+        std::vector<uint8_t> outFp16;
+        Check(ScreenshotEngine::UnpackDxgiPixelsToRgba(
+            DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, fp16Src.data(), kPitch8, outFp16),
+            "UnpackDxgiPixelsToRgba R16G16B16A16_FLOAT with padded RowPitch succeeded");
+        Check(outFp16[0] == 255 && outFp16[1] == 0 && NearByte(outFp16[2], 188, 2) && outFp16[3] == 255,
+            "FP16 row 0 pixel (0,0) linear-to-sRGB conversion accurate");
+        const size_t fp16Corner = (1 * W + 2) * 4u;
+        Check(outFp16[fp16Corner + 0] == 0 && outFp16[fp16Corner + 1] == 255 &&
+            outFp16[fp16Corner + 2] == 0 && NearByte(outFp16[fp16Corner + 3], 128, 1),
+            "FP16 row 1 pixel (2,1) skips stride padding accurately");
+
+        std::vector<uint8_t> tooSmall;
+        Check(!ScreenshotEngine::UnpackDxgiPixelsToRgba(
+            DXGI_FORMAT_R8G8B8A8_UNORM, W, H, rgbaSrc.data(), 8, tooSmall),
+            "Rejects undersized RowPitch < width * bpp");
     }
 
     // ---- Test 2: WicImageWriter 4K PNG & JPEG --------------------------------
@@ -558,10 +683,10 @@ namespace
         engine.SetTestRenderHook(
             [](uint32_t w, uint32_t h, bool dualPass,
                std::vector<uint8_t>& outB, std::vector<uint8_t>& outW,
-               bool& outFlip, std::string&) -> bool {
+               ScreenshotManager::PixelOrientation& outOrient, std::string&) -> bool {
                 const size_t n = static_cast<size_t>(w) * h * 4u;
                 outB.assign(n, 0);
-                outFlip = false;
+                outOrient = {false, false};
                 if (dualPass)
                 {
                     outW.assign(n, 0);
@@ -677,6 +802,160 @@ namespace
         Check(engine.CaptureFrameImmediate(&immReq, pixels.data(), pixels.size(), &immInfo, errBuf, sizeof(errBuf)) == GAKU_E_INVALID_ARGUMENT,
             "captureFrameImmediate rejects width > 7680");
 
+        // 180-degree rotated raw buffers (flipHorizontal=true, flipVertical=true)
+        // in both opaque and dual-pass alpha modes, verifying PNG, RGBA8, and BGRA8 parity.
+        engine.SetTestRenderHook(
+            [](uint32_t w, uint32_t h, bool dualPass,
+               std::vector<uint8_t>& outB, std::vector<uint8_t>& outW,
+               ScreenshotManager::PixelOrientation& outOrient, std::string&) -> bool {
+                const size_t n = static_cast<size_t>(w) * h * 4u;
+                outB.assign(n, 0);
+                outOrient = {true, true};
+                if (dualPass) outW.assign(n, 0);
+
+                // Define upright scene pixel at (ux, uy), then store at 180-rotated (w-1-ux, h-1-uy).
+                for (uint32_t uy = 0; uy < h; ++uy)
+                {
+                    for (uint32_t ux = 0; ux < w; ++ux)
+                    {
+                        const uint32_t rx = w - 1u - ux;
+                        const uint32_t ry = h - 1u - uy;
+                        const size_t ri = (static_cast<size_t>(ry) * w + rx) * 4u;
+
+                        const bool topHalf = (uy < h / 2u);
+                        const bool leftHalf = (ux < w / 2u);
+                        if (!dualPass)
+                        {
+                            // Four distinct opaque quadrants in upright space:
+                            // TL=(230,20,30), TR=(20,210,40), BL=(30,50,235), BR=(240,200,20)
+                            if (topHalf && leftHalf) { outB[ri+0]=230; outB[ri+1]=20; outB[ri+2]=30; outB[ri+3]=255; }
+                            else if (topHalf)        { outB[ri+0]=20;  outB[ri+1]=210; outB[ri+2]=40; outB[ri+3]=255; }
+                            else if (leftHalf)       { outB[ri+0]=30;  outB[ri+1]=50; outB[ri+2]=235; outB[ri+3]=255; }
+                            else                     { outB[ri+0]=240; outB[ri+1]=200; outB[ri+2]=20; outB[ri+3]=255; }
+                        }
+                        else
+                        {
+                            // Upright TL=(230,20,30,A=255), TR=(transparent), BL=(30,50,235,A=255), BR=(200,120,60,A~128)
+                            if (topHalf && leftHalf)
+                            {
+                                outB[ri+0]=230; outB[ri+1]=20; outB[ri+2]=30; outB[ri+3]=255;
+                                outW[ri+0]=230; outW[ri+1]=20; outW[ri+2]=30; outW[ri+3]=255;
+                            }
+                            else if (topHalf)
+                            {
+                                outB[ri+0]=0; outB[ri+1]=0; outB[ri+2]=0; outB[ri+3]=255;
+                                outW[ri+0]=224; outW[ri+1]=224; outW[ri+2]=224; outW[ri+3]=255;
+                            }
+                            else if (leftHalf)
+                            {
+                                outB[ri+0]=30; outB[ri+1]=50; outB[ri+2]=235; outB[ri+3]=255;
+                                outW[ri+0]=30; outW[ri+1]=50; outW[ri+2]=235; outW[ri+3]=255;
+                            }
+                            else
+                            {
+                                // straight (200,120,60) at alpha=0.5 over ACES white 224 -> B=(100,60,30), W=(212,172,142)
+                                outB[ri+0]=100; outB[ri+1]=60; outB[ri+2]=30; outB[ri+3]=255;
+                                outW[ri+0]=212; outW[ri+1]=172; outW[ri+2]=142; outW[ri+3]=255;
+                            }
+                        }
+                    }
+                }
+                return true;
+            },
+            1280u, 720u);
+
+        auto verifyOrientedMode = [&](uint32_t alphaMode, const std::wstring& fileName, bool expectAlpha) {
+            constexpr uint32_t CW = 16;
+            constexpr uint32_t CH = 8;
+            const std::filesystem::path pngPath = dir / fileName;
+            const std::string pngUtf8 = ScreenshotManager::PathToUtf8(pngPath);
+
+            GakuScreenshotFileRequestV1 fReq{};
+            fReq.abiVersion = GAKU_SCREENSHOT_VERSION;
+            fReq.structSize = sizeof(fReq);
+            fReq.width = CW;
+            fReq.height = CH;
+            fReq.imageFormat = GAKU_IMAGE_PNG;
+            fReq.alphaMode = alphaMode;
+            std::memcpy(fReq.outputPathUtf8, pngUtf8.c_str(), pngUtf8.size() + 1);
+
+            uint64_t tId = 0;
+            Check(engine.RequestFileCapture(&fReq, &tId, dir) == GAKU_OK,
+                "180-deg oriented RequestFileCapture accepted");
+            GakuScreenshotResultV1 fRes{};
+            for (int attempt = 0; attempt < 200; ++attempt)
+            {
+                if (engine.PollCapture(tId, &fRes) == GAKU_OK && fRes.state != GAKU_CAPTURE_PENDING) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            Check(fRes.state == GAKU_CAPTURE_SUCCEEDED && fRes.hasAlpha == (expectAlpha ? 1u : 0u),
+                "180-deg oriented file capture succeeded");
+            engine.ReleaseTicket(tId);
+
+            ScreenshotManager::WicWriter::DecodedImage dec;
+            std::string dErr;
+            Check(ScreenshotManager::WicWriter::ReadImageForTest(pngPath, dec, &dErr),
+                "Decoded 180-deg oriented PNG: " + dErr);
+
+            // Immediate RGBA8 & BGRA8 capture
+            GakuScreenshotFrameRequestV1 rReq{GAKU_SCREENSHOT_VERSION, sizeof(rReq), CW, CH,
+                GAKU_PIXEL_RGBA8_SRGB_TOPDOWN, alphaMode};
+            GakuScreenshotFrameRequestV1 bReq{GAKU_SCREENSHOT_VERSION, sizeof(bReq), CW, CH,
+                GAKU_PIXEL_BGRA8_SRGB_TOPDOWN, alphaMode};
+            GakuScreenshotFrameInfoV1 rInfo{}, bInfo{};
+            std::vector<uint8_t> rgbaBuf(CW * CH * 4u, 0);
+            std::vector<uint8_t> bgraBuf(CW * CH * 4u, 0);
+            Check(engine.CaptureFrameImmediate(&rReq, rgbaBuf.data(), rgbaBuf.size(), &rInfo, errBuf, sizeof(errBuf)) == GAKU_OK,
+                "180-deg oriented CaptureFrameImmediate RGBA8 succeeded");
+            Check(engine.CaptureFrameImmediate(&bReq, bgraBuf.data(), bgraBuf.size(), &bInfo, errBuf, sizeof(errBuf)) == GAKU_OK,
+                "180-deg oriented CaptureFrameImmediate BGRA8 succeeded");
+            Check(rInfo.rowPitch == CW * 4u && bInfo.rowPitch == CW * 4u &&
+                rInfo.hasAlpha == (expectAlpha ? 1u : 0u) && bInfo.hasAlpha == (expectAlpha ? 1u : 0u),
+                "180-deg oriented immediate captures report matching rowPitch and hasAlpha");
+
+            // Byte-for-byte parity between file PNG, immediate RGBA8, and immediate BGRA8 (swapped R<->B)
+            bool fileMatchesRgba = (dec.rgbaTopDown == rgbaBuf);
+            bool bgraMatchesRgba = true;
+            for (size_t i = 0; i < CW * CH; ++i)
+            {
+                const size_t k = i * 4u;
+                if (bgraBuf[k + 0] != rgbaBuf[k + 2] || bgraBuf[k + 1] != rgbaBuf[k + 1] ||
+                    bgraBuf[k + 2] != rgbaBuf[k + 0] || bgraBuf[k + 3] != rgbaBuf[k + 3])
+                {
+                    bgraMatchesRgba = false;
+                    break;
+                }
+            }
+            Check(fileMatchesRgba, "File PNG pixels match CaptureFrameImmediate RGBA8");
+            Check(bgraMatchesRgba, "CaptureFrameImmediate BGRA8 matches RGBA8 with R<->B swap");
+
+            auto px = [&](uint32_t x, uint32_t y) -> const uint8_t* {
+                return &rgbaBuf[(static_cast<size_t>(y) * CW + x) * 4u];
+            };
+            Check(px(1, 1)[0] == 230 && px(1, 1)[1] == 20 && px(1, 1)[2] == 30 && px(1, 1)[3] == 255,
+                "Upright top-left quadrant restored accurately");
+            Check(px(1, 6)[0] == 30 && px(1, 6)[1] == 50 && px(1, 6)[2] == 235 && px(1, 6)[3] == 255,
+                "Upright bottom-left quadrant restored accurately");
+            if (!expectAlpha)
+            {
+                Check(px(14, 1)[0] == 20 && px(14, 1)[1] == 210 && px(14, 1)[2] == 40 && px(14, 1)[3] == 255,
+                    "Opaque upright top-right quadrant restored accurately");
+                Check(px(14, 6)[0] == 240 && px(14, 6)[1] == 200 && px(14, 6)[2] == 20 && px(14, 6)[3] == 255,
+                    "Opaque upright bottom-right quadrant restored accurately");
+            }
+            else
+            {
+                Check(px(14, 1)[0] == 0 && px(14, 1)[1] == 0 && px(14, 1)[2] == 0 && px(14, 1)[3] == 0,
+                    "Alpha upright top-right quadrant transparent");
+                Check(NearByte(px(14, 6)[3], 128, 1) && NearByte(px(14, 6)[0], 200, 3) &&
+                    NearByte(px(14, 6)[1], 120, 3) && NearByte(px(14, 6)[2], 60, 3),
+                    "Alpha upright bottom-right semi-transparent quadrant restored accurately");
+            }
+        };
+
+        verifyOrientedMode(GAKU_SCREENSHOT_ALPHA_OPAQUE, L"oriented_opaque.png", false);
+        verifyOrientedMode(GAKU_SCREENSHOT_ALPHA_FORCE_TRANSPARENT, L"oriented_alpha.png", true);
+
         engine.Shutdown();
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
@@ -698,10 +977,10 @@ namespace
         engine.InitializeWorker();
         engine.SetTestRenderHook(
             [](uint32_t w, uint32_t h, bool, std::vector<uint8_t>& b, std::vector<uint8_t>& wBuf,
-               bool& flip, std::string&) {
+               ScreenshotManager::PixelOrientation& orient, std::string&) {
                 b.assign(static_cast<size_t>(w) * h * 4u, 200);
                 wBuf.assign(static_cast<size_t>(w) * h * 4u, 200);
-                flip = false;
+                orient = {false, false};
                 return true;
             },
             1920u, 1080u);
@@ -860,9 +1139,9 @@ namespace
         Check(host.services.count("screenshotmanager.web-panel/v1") == 1u,
             "Registered screenshotmanager.web-panel/v1");
         Check(!host.registeredHotkeyIds.empty() && host.registeredHotkeyIds[0] == "take-screenshot" &&
-            host.registeredHotkeyVk == VK_F11 &&
+            host.registeredHotkeyVk == VK_F7 &&
             host.registeredHotkeyDisplay == "ScreenshotManager: Capture Screenshot",
-            "Registered VK_F11 take-screenshot hotkey");
+            "Registered VK_F7 take-screenshot hotkey");
 
         GakuScreenshotServiceV1 capSvc{};
         if (host.services[GAKU_SERVICE_SCREENSHOT_CAPTURE].size() == sizeof(capSvc))
@@ -900,7 +1179,333 @@ namespace
         desc.shutdown(pluginState);
         Check(host.hotkeyUnregistered, "Shutdown unregisters take-screenshot hotkey");
 
+        GakuScreenshotServiceV1 capSvcCheck{};
+        if (host.services["screenshotmanager.capture/v1"].size() == sizeof(capSvcCheck))
+            std::memcpy(&capSvcCheck, host.services["screenshotmanager.capture/v1"].data(), sizeof(capSvcCheck));
+        Check(capSvcCheck.armPresentCapture != nullptr && capSvcCheck.consumePresentCapture != nullptr &&
+            capSvcCheck.cancelPresentCapture != nullptr,
+            "DLL GakuScreenshotServiceV1 exports Present capture methods");
+
         FreeLibrary(mod);
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+
+    void TestSwapchainPresentCaptureStateMachine()
+    {
+        BeginTest("Swapchain Present Backbuffer Capture State Machine");
+        ScreenshotManager::ScreenshotEngine engine;
+        engine.SetTestRenderHook(
+            [](uint32_t, uint32_t, bool, std::vector<uint8_t>&, std::vector<uint8_t>&,
+                ScreenshotManager::PixelOrientation&, std::string&) {
+                return true;
+            },
+            4u, 2u);
+        engine.SetTestUnityThreadBypass(true);
+        engine.SetTestPresentHookOverride(true);
+
+        // 1. Before any arm, consume reports outToken=0 cleanly.
+        uint64_t tok = 99;
+        std::vector<uint8_t> out(4u * 2u * 4u, 0);
+        GakuScreenshotFrameInfoV1 info{};
+        info.abiVersion = GAKU_SCREENSHOT_VERSION;
+        info.structSize = sizeof(info);
+        char err[128]{};
+        Check(engine.ConsumePresentCapture(&tok, out.data(), out.size(), &info, err, sizeof(err)) == GAKU_OK && tok == 0,
+            "Unarmed consume returns GAKU_OK with token=0");
+
+        // 2. Arm 4x2 BGRA8 -> simulate DXGI B8G8R8A8_UNORM_SRGB upright Present (no 180 flip!)
+        Check(engine.ArmPresentCapture(7u, 4u, 2u, GAKU_PIXEL_RGBA8_SRGB_TOPDOWN) == GAKU_OK,
+            "ArmPresentCapture 4x2 succeeded");
+        Check(engine.ConsumePresentCapture(&tok, out.data(), out.size(), &info, err, sizeof(err)) == GAKU_OK && tok == 0,
+            "Pending consume before Present returns token=0");
+
+        std::vector<uint8_t> raw(4u * 2u * 4u, 0);
+        // Pixel (0, 0) in BGRA = (B=30, G=20, R=10, A=0), Pixel (3, 1) = (B=130, G=120, R=110, A=12)
+        raw[0] = 30; raw[1] = 20; raw[2] = 10; raw[3] = 0;
+        const size_t br = (1u * 4u + 3u) * 4u;
+        raw[br + 0] = 130; raw[br + 1] = 120; raw[br + 2] = 110; raw[br + 3] = 12;
+
+        Check(engine.SimulatePresentBackbufferForTest(4u, 2u, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+            raw.data(), 4u * 4u, 555u), "SimulatePresentBackbufferForTest succeeded");
+
+        Check(engine.ConsumePresentCapture(&tok, out.data(), out.size(), &info, err, sizeof(err)) == GAKU_OK &&
+            tok == 7u && info.width == 4u && info.height == 2u && info.hasAlpha == 0u && info.unityFrame == 555u,
+            "ConsumePresentCapture returned captured token and metadata");
+        Check(out[0] == 10 && out[1] == 20 && out[2] == 30 && out[3] == 255 &&
+            out[br + 0] == 110 && out[br + 1] == 120 && out[br + 2] == 130 && out[br + 3] == 255,
+            "Present backbuffer preserves upright orientation, converts BGRA->RGBA, forces opaque alpha=255");
+
+        // 3. Resolution mismatch triggers failure status so VideoExporter falls back cleanly
+        Check(engine.ArmPresentCapture(8u, 4u, 2u, GAKU_PIXEL_RGBA8_SRGB_TOPDOWN) == GAKU_OK,
+            "Re-arm token=8 succeeded");
+        Check(!engine.SimulatePresentBackbufferForTest(8u, 2u, DXGI_FORMAT_R8G8B8A8_UNORM,
+            raw.data(), 8u * 4u, 556u), "Mismatched backbuffer size rejected");
+        Check(engine.ConsumePresentCapture(&tok, out.data(), out.size(), &info, err, sizeof(err)) == GAKU_E_UNAVAILABLE,
+            "ConsumePresentCapture surfaces GAKU_E_UNAVAILABLE after size mismatch");
+
+        engine.Shutdown();
+    }
+
+    void TestCameraRenderBottomUpOrientation()
+    {
+        BeginTest("Camera.Render() Bottom-Up Un-Mirrored Orientation & Present Parity");
+        using ScreenshotManager::ScreenshotEngine;
+
+        // 1. Verify offscreen Camera.Render() readback orientation contract directly.
+        const auto offscreenOrient = ScreenshotEngine::OffscreenRenderOrientation();
+        Check(!offscreenOrient.flipHorizontal && offscreenOrient.flipVertical,
+            "OffscreenRenderOrientation is flipVertical=true, flipHorizontal=false");
+
+        const std::filesystem::path dir = MakeTempTestDir(L"CameraOrient");
+        constexpr uint32_t W = 8;
+        constexpr uint32_t H = 4;
+
+        // Distinct asymmetric upright scene so any horizontal or vertical flip is caught:
+        // - Top-left     (0, 0)     -> (10, 20, 30, 255)
+        // - Top-right    (W-1, 0)   -> (40, 50, 60, 255) in opaque, transparent (A=0) in alpha
+        // - Bottom-left  (0, H-1)   -> (70, 80, 90, 255)
+        // - Bottom-right (W-1, H-1) -> (100, 110, 120, 255) in opaque, semi-transparent (200,120,60,A~128) in alpha
+        // - Remaining pixels: distinct gradient/midtones in opaque, background in alpha.
+        auto makeUprightPixel = [&](uint32_t ux, uint32_t uy, bool dualPass, bool isWhitePass,
+            uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) {
+            if (ux == 0 && uy == 0)
+            {
+                r = 10; g = 20; b = 30; a = 255;
+            }
+            else if (ux == W - 1u && uy == 0)
+            {
+                if (dualPass)
+                {
+                    r = g = b = isWhitePass ? 224 : 0;
+                    a = 255;
+                }
+                else
+                {
+                    r = 40; g = 50; b = 60; a = 255;
+                }
+            }
+            else if (ux == 0 && uy == H - 1u)
+            {
+                r = 70; g = 80; b = 90; a = 255;
+            }
+            else if (ux == W - 1u && uy == H - 1u)
+            {
+                if (dualPass)
+                {
+                    // straight (200,120,60) at alpha=0.5 over ACES white 224 -> B=(100,60,30), W=(212,172,142)
+                    r = isWhitePass ? 212 : 100;
+                    g = isWhitePass ? 172 : 60;
+                    b = isWhitePass ? 142 : 30;
+                    a = 255;
+                }
+                else
+                {
+                    r = 100; g = 110; b = 120; a = 255;
+                }
+            }
+            else
+            {
+                if (dualPass)
+                {
+                    r = g = b = isWhitePass ? 224 : 0;
+                    a = 255;
+                }
+                else
+                {
+                    r = static_cast<uint8_t>(20 + ux * 10);
+                    g = static_cast<uint8_t>(40 + uy * 20);
+                    b = static_cast<uint8_t>(150 + ux * 5);
+                    a = 255;
+                }
+            }
+        };
+
+        ScreenshotEngine engine;
+        engine.SetTestUnityThreadBypass(true);
+        engine.SetTestPresentHookOverride(true);
+        engine.InitializeWorker();
+        engine.SetTestRenderHook(
+            [&](uint32_t w, uint32_t h, bool dualPass,
+                std::vector<uint8_t>& outB, std::vector<uint8_t>& outW,
+                ScreenshotManager::PixelOrientation& outOrient, std::string&) -> bool {
+                const size_t n = static_cast<size_t>(w) * h * 4u;
+                outB.assign(n, 0);
+                if (dualPass) outW.assign(n, 0);
+                outOrient = ScreenshotEngine::OffscreenRenderOrientation();
+
+                // Simulate D3D11 RenderTexture / Texture2D bottom-up readback:
+                // Source row (h - 1 - uy) stores upright row uy, with x UN-MIRRORED (sx == ux).
+                // Specifically, bottom-left (0, h-1) in source holds upright top-left (0, 0).
+                for (uint32_t uy = 0; uy < h; ++uy)
+                {
+                    const uint32_t sy = h - 1u - uy;
+                    for (uint32_t ux = 0; ux < w; ++ux)
+                    {
+                        const size_t si = (static_cast<size_t>(sy) * w + ux) * 4u;
+                        uint8_t r = 0, g = 0, b = 0, a = 255;
+                        makeUprightPixel(ux, uy, dualPass, false, r, g, b, a);
+                        outB[si + 0] = r; outB[si + 1] = g; outB[si + 2] = b; outB[si + 3] = a;
+                        if (dualPass)
+                        {
+                            makeUprightPixel(ux, uy, dualPass, true, r, g, b, a);
+                            outW[si + 0] = r; outW[si + 1] = g; outW[si + 2] = b; outW[si + 3] = a;
+                        }
+                    }
+                }
+                return true;
+            },
+            W, H);
+
+        char errBuf[256]{};
+
+        // 2. Opaque path (file PNG + immediate RGBA8 + immediate BGRA8)
+        {
+            const std::filesystem::path opaquePng = dir / L"camera_opaque.png";
+            const std::string opaquePngUtf8 = ScreenshotManager::PathToUtf8(opaquePng);
+            GakuScreenshotFileRequestV1 fReq{};
+            fReq.abiVersion = GAKU_SCREENSHOT_VERSION;
+            fReq.structSize = sizeof(fReq);
+            fReq.width = W;
+            fReq.height = H;
+            fReq.imageFormat = GAKU_IMAGE_PNG;
+            fReq.alphaMode = GAKU_SCREENSHOT_ALPHA_OPAQUE;
+            std::memcpy(fReq.outputPathUtf8, opaquePngUtf8.c_str(), opaquePngUtf8.size() + 1);
+
+            uint64_t ticket = 0;
+            Check(engine.RequestFileCapture(&fReq, &ticket, dir) == GAKU_OK,
+                "Opaque bottom-up RequestFileCapture accepted");
+            GakuScreenshotResultV1 fRes{};
+            for (int i = 0; i < 200; ++i)
+            {
+                if (engine.PollCapture(ticket, &fRes) == GAKU_OK && fRes.state != GAKU_CAPTURE_PENDING) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            Check(fRes.state == GAKU_CAPTURE_SUCCEEDED && fRes.hasAlpha == 0u,
+                "Opaque bottom-up file PNG capture succeeded");
+            engine.ReleaseTicket(ticket);
+
+            ScreenshotManager::WicWriter::DecodedImage dec;
+            std::string dErr;
+            Check(ScreenshotManager::WicWriter::ReadImageForTest(opaquePng, dec, &dErr),
+                "Decoded opaque bottom-up PNG: " + dErr);
+
+            GakuScreenshotFrameRequestV1 rReq{GAKU_SCREENSHOT_VERSION, sizeof(rReq), W, H,
+                GAKU_PIXEL_RGBA8_SRGB_TOPDOWN, GAKU_SCREENSHOT_ALPHA_OPAQUE};
+            GakuScreenshotFrameRequestV1 bReq{GAKU_SCREENSHOT_VERSION, sizeof(bReq), W, H,
+                GAKU_PIXEL_BGRA8_SRGB_TOPDOWN, GAKU_SCREENSHOT_ALPHA_OPAQUE};
+            GakuScreenshotFrameInfoV1 rInfo{}, bInfo{};
+            std::vector<uint8_t> rgbaBuf(W * H * 4u, 0);
+            std::vector<uint8_t> bgraBuf(W * H * 4u, 0);
+            Check(engine.CaptureFrameImmediate(&rReq, rgbaBuf.data(), rgbaBuf.size(), &rInfo, errBuf, sizeof(errBuf)) == GAKU_OK,
+                "Opaque bottom-up CaptureFrameImmediate RGBA8 succeeded");
+            Check(engine.CaptureFrameImmediate(&bReq, bgraBuf.data(), bgraBuf.size(), &bInfo, errBuf, sizeof(errBuf)) == GAKU_OK,
+                "Opaque bottom-up CaptureFrameImmediate BGRA8 succeeded");
+            Check(dec.rgbaTopDown == rgbaBuf,
+                "Opaque Camera.Render() file PNG matches CaptureFrameImmediate RGBA8");
+
+            auto px = [&](uint32_t x, uint32_t y) -> const uint8_t* {
+                return &rgbaBuf[(static_cast<size_t>(y) * W + x) * 4u];
+            };
+            // Bottom-left source (0, H-1) -> top-left output (0, 0), NOT (W-1, 0)
+            Check(px(0, 0)[0] == 10 && px(0, 0)[1] == 20 && px(0, 0)[2] == 30 && px(0, 0)[3] == 255,
+                "Opaque bottom-left source (0,H-1) maps to top-left output (0,0)");
+            Check(px(W - 1u, 0)[0] == 40 && px(W - 1u, 0)[1] == 50 && px(W - 1u, 0)[2] == 60 && px(W - 1u, 0)[3] == 255,
+                "Opaque bottom-right source (W-1,H-1) maps to top-right output (W-1,0) without horizontal mirror");
+            Check(px(0, H - 1u)[0] == 70 && px(0, H - 1u)[1] == 80 && px(0, H - 1u)[2] == 90 && px(0, H - 1u)[3] == 255,
+                "Opaque top-left source (0,0) maps to bottom-left output (0,H-1)");
+            Check(px(W - 1u, H - 1u)[0] == 100 && px(W - 1u, H - 1u)[1] == 110 && px(W - 1u, H - 1u)[2] == 120 && px(W - 1u, H - 1u)[3] == 255,
+                "Opaque top-right source (W-1,0) maps to bottom-right output (W-1,H-1)");
+
+            // BGRA8 top-left pixel must be (B=30, G=20, R=10, A=255)
+            Check(bgraBuf[0] == 30 && bgraBuf[1] == 20 && bgraBuf[2] == 10 && bgraBuf[3] == 255,
+                "Opaque BGRA8 top-left output matches un-mirrored RGBA8");
+
+            // Parity check against swapchain-present upright top-down capture for the same scene
+            std::vector<uint8_t> presentSrc(W * H * 4u, 0);
+            for (uint32_t uy = 0; uy < H; ++uy)
+            {
+                for (uint32_t ux = 0; ux < W; ++ux)
+                {
+                    const size_t i = (static_cast<size_t>(uy) * W + ux) * 4u;
+                    uint8_t r = 0, g = 0, b = 0, a = 255;
+                    makeUprightPixel(ux, uy, false, false, r, g, b, a);
+                    presentSrc[i + 0] = r; presentSrc[i + 1] = g; presentSrc[i + 2] = b; presentSrc[i + 3] = 0;
+                }
+            }
+            Check(engine.ArmPresentCapture(42u, W, H, GAKU_PIXEL_RGBA8_SRGB_TOPDOWN) == GAKU_OK,
+                "ArmPresentCapture for orientation parity succeeded");
+            Check(engine.SimulatePresentBackbufferForTest(W, H, DXGI_FORMAT_R8G8B8A8_UNORM,
+                presentSrc.data(), W * 4u, 900u), "SimulatePresentBackbufferForTest parity frame succeeded");
+            uint64_t gotTok = 0;
+            GakuScreenshotFrameInfoV1 pInfo{};
+            pInfo.abiVersion = GAKU_SCREENSHOT_VERSION;
+            pInfo.structSize = sizeof(pInfo);
+            std::vector<uint8_t> presentOut(W * H * 4u, 0);
+            Check(engine.ConsumePresentCapture(&gotTok, presentOut.data(), presentOut.size(), &pInfo, errBuf, sizeof(errBuf)) == GAKU_OK &&
+                gotTok == 42u && presentOut == rgbaBuf,
+                "Offscreen Camera.Render() opaque RGBA8 is byte-identical to swapchain-present upright output");
+        }
+
+        // 3. Dual-pass Alpha path (file PNG + immediate RGBA8 + immediate BGRA8)
+        {
+            const std::filesystem::path alphaPng = dir / L"camera_alpha.png";
+            const std::string alphaPngUtf8 = ScreenshotManager::PathToUtf8(alphaPng);
+            GakuScreenshotFileRequestV1 fReq{};
+            fReq.abiVersion = GAKU_SCREENSHOT_VERSION;
+            fReq.structSize = sizeof(fReq);
+            fReq.width = W;
+            fReq.height = H;
+            fReq.imageFormat = GAKU_IMAGE_PNG;
+            fReq.alphaMode = GAKU_SCREENSHOT_ALPHA_FORCE_TRANSPARENT;
+            std::memcpy(fReq.outputPathUtf8, alphaPngUtf8.c_str(), alphaPngUtf8.size() + 1);
+
+            uint64_t ticket = 0;
+            Check(engine.RequestFileCapture(&fReq, &ticket, dir) == GAKU_OK,
+                "Alpha bottom-up RequestFileCapture accepted");
+            GakuScreenshotResultV1 fRes{};
+            for (int i = 0; i < 200; ++i)
+            {
+                if (engine.PollCapture(ticket, &fRes) == GAKU_OK && fRes.state != GAKU_CAPTURE_PENDING) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            Check(fRes.state == GAKU_CAPTURE_SUCCEEDED && fRes.hasAlpha == 1u,
+                "Alpha bottom-up file PNG capture succeeded");
+            engine.ReleaseTicket(ticket);
+
+            ScreenshotManager::WicWriter::DecodedImage dec;
+            std::string dErr;
+            Check(ScreenshotManager::WicWriter::ReadImageForTest(alphaPng, dec, &dErr),
+                "Decoded alpha bottom-up PNG: " + dErr);
+
+            GakuScreenshotFrameRequestV1 rReq{GAKU_SCREENSHOT_VERSION, sizeof(rReq), W, H,
+                GAKU_PIXEL_RGBA8_SRGB_TOPDOWN, GAKU_SCREENSHOT_ALPHA_FORCE_TRANSPARENT};
+            GakuScreenshotFrameInfoV1 rInfo{};
+            std::vector<uint8_t> rgbaBuf(W * H * 4u, 0);
+            Check(engine.CaptureFrameImmediate(&rReq, rgbaBuf.data(), rgbaBuf.size(), &rInfo, errBuf, sizeof(errBuf)) == GAKU_OK,
+                "Alpha bottom-up CaptureFrameImmediate RGBA8 succeeded");
+            Check(dec.rgbaTopDown == rgbaBuf,
+                "Alpha Camera.Render() file PNG matches CaptureFrameImmediate RGBA8");
+
+            auto px = [&](uint32_t x, uint32_t y) -> const uint8_t* {
+                return &rgbaBuf[(static_cast<size_t>(y) * W + x) * 4u];
+            };
+            // Bottom-left source (0, H-1) -> top-left output (0, 0) opaque (10,20,30,255), NOT (W-1, 0)
+            Check(px(0, 0)[0] == 10 && px(0, 0)[1] == 20 && px(0, 0)[2] == 30 && px(0, 0)[3] == 255,
+                "Alpha bottom-left source (0,H-1) maps to top-left output (0,0)");
+            // Top-right output (W-1, 0) is transparent background (NOT mirrored opaque (10,20,30))
+            Check(px(W - 1u, 0)[0] == 0 && px(W - 1u, 0)[1] == 0 && px(W - 1u, 0)[2] == 0 && px(W - 1u, 0)[3] == 0,
+                "Alpha top-right output (W-1,0) stays transparent (not mirrored from top-left)");
+            // Bottom-left output (0, H-1) is opaque (70,80,90,255)
+            Check(px(0, H - 1u)[0] == 70 && px(0, H - 1u)[1] == 80 && px(0, H - 1u)[2] == 90 && px(0, H - 1u)[3] == 255,
+                "Alpha top-left source (0,0) maps to bottom-left output (0,H-1)");
+            // Bottom-right output (W-1, H-1) recovers semi-transparent straight RGB(200,120,60), A~128
+            Check(NearByte(px(W - 1u, H - 1u)[3], 128, 1) && NearByte(px(W - 1u, H - 1u)[0], 200, 3) &&
+                NearByte(px(W - 1u, H - 1u)[1], 120, 3) && NearByte(px(W - 1u, H - 1u)[2], 60, 3),
+                "Alpha bottom-right output (W-1,H-1) recovers straight RGB and alpha without horizontal mirror");
+        }
+
+        engine.Shutdown();
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
     }
@@ -909,9 +1514,12 @@ namespace
 int main(int argc, char** argv)
 {
     TestAlphaMatte();
+    TestDxgiRowPitchUnpack();
     TestWicImageWriter();
     TestConfigStore();
     TestEngineAndCaptureService();
+    TestSwapchainPresentCaptureStateMachine();
+    TestCameraRenderBottomUpOrientation();
     TestWebPanelBridge();
 
     std::filesystem::path dllPath;
