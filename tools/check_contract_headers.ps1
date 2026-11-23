@@ -33,7 +33,9 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 $RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
 
 if ([string]::IsNullOrWhiteSpace($LoaderIncludeRoot)) {
-    $LoaderIncludeRoot = [IO.Path]::GetFullPath((Join-Path $RepoRoot '..\..\GakuLoader\dev\include'))
+    $mainLoader = [IO.Path]::GetFullPath((Join-Path $RepoRoot '..\..\GakuLoader\main\include'))
+    $devLoader = [IO.Path]::GetFullPath((Join-Path $RepoRoot '..\..\GakuLoader\dev\include'))
+    $LoaderIncludeRoot = if (Test-Path -LiteralPath $mainLoader -PathType Container) { $mainLoader } else { $devLoader }
 }
 if ([string]::IsNullOrWhiteSpace($MotionIncludeRoot)) {
     $MotionIncludeRoot = [IO.Path]::GetFullPath((Join-Path $RepoRoot '..\..\GakuMotion\dev\include'))
