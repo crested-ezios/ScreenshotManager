@@ -67,6 +67,16 @@ $groups = @(
 )
 
 $failures = 0
+function Get-NormalizedHeaderHash([string]$Path) {
+    $text = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8) -replace "`r`n", "`n"
+    $bytes = [Text.Encoding]::UTF8.GetBytes($text)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '')
+    } finally {
+        $sha.Dispose()
+    }
+}
 foreach ($group in $groups) {
     if (-not (Test-Path -LiteralPath $group.Root)) {
         Write-Host ("  SKIP: {0} include directory not found; nothing to compare against." -f $group.Label) -ForegroundColor Yellow
@@ -86,8 +96,8 @@ foreach ($group in $groups) {
             $failures++
             continue
         }
-        $left = (Get-FileHash -LiteralPath $mine -Algorithm SHA256).Hash
-        $right = (Get-FileHash -LiteralPath $theirs -Algorithm SHA256).Hash
+        $left = Get-NormalizedHeaderHash $mine
+        $right = Get-NormalizedHeaderHash $theirs
         if ($left -ne $right) {
             Write-Host ("  DRIFT: {0}" -f $header) -ForegroundColor Red
             Write-Host ("    ScreenshotManager include\{0}  {1}" -f $header, $left)
