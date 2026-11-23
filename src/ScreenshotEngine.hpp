@@ -9,6 +9,7 @@
 #endif
 
 #include "../include/GakuPlugin.h"
+#include "../include/GakuPluginMetadata.h"
 #include "../include/GakuMotionClock.h"
 #include "../include/GakuScreenshot.h"
 #include "../include/GakuMotionStageState.h"
@@ -346,36 +347,52 @@ namespace ScreenshotManager
 
         void SetHostApi(const GakuHostApi* host)
         {
-            std::lock_guard<std::mutex> lock(hostMutex_);
-            if (host)
+            GakuLogService logCopy{};
+            std::string unavailableMsg;
             {
-                hostApi_ = *host;
-                hostApiSet_ = true;
-                host->queryService(host->hostContext, GAKU_SERVICE_LOG, GAKU_SERVICE_VERSION,
-                    sizeof(logService_), &logService_);
-                host->queryService(host->hostContext, GAKU_SERVICE_MAIN_THREAD, GAKU_SERVICE_VERSION,
-                    sizeof(mainThreadService_), &mainThreadService_);
-                GakuHookService hooks{};
-                if (host->queryService(host->hostContext, GAKU_SERVICE_HOOKS, GAKU_SERVICE_VERSION,
-                        sizeof(hooks), &hooks) == GAKU_OK &&
-                    hooks.abiVersion == GAKU_SERVICE_VERSION && hooks.structSize >= sizeof(GakuHookService) &&
-                    hooks.acquire && hooks.release)
-                {
-                    hookService_ = hooks;
-                    hookServiceCached_ = true;
-                }
-            }
-            else
-            {
-                hostApi_ = {};
-                hostApiSet_ = false;
-                logService_ = {};
-                mainThreadService_ = {};
+                std::lock_guard<std::mutex> lock(hostMutex_);
+                pluginsService_ = {};
+                pluginsServiceCached_ = false;
+                gakuMotionPluginsUnavailable_ = false;
+                gakuMotionKnownUnavailable_ = false;
+                gakuMotionUnavailableLogged_ = false;
+                stageStateService_ = {};
+                stageStateCached_ = false;
                 hookService_ = {};
                 hookServiceCached_ = false;
                 clockService_ = {};
                 clockServiceCached_ = false;
+
+                if (host)
+                {
+                    hostApi_ = *host;
+                    hostApiSet_ = true;
+                    host->queryService(host->hostContext, GAKU_SERVICE_LOG, GAKU_SERVICE_VERSION,
+                        sizeof(logService_), &logService_);
+                    host->queryService(host->hostContext, GAKU_SERVICE_MAIN_THREAD, GAKU_SERVICE_VERSION,
+                        sizeof(mainThreadService_), &mainThreadService_);
+                    GakuHookService hooks{};
+                    if (host->queryService(host->hostContext, GAKU_SERVICE_HOOKS, GAKU_SERVICE_VERSION,
+                            sizeof(hooks), &hooks) == GAKU_OK &&
+                        hooks.abiVersion == GAKU_SERVICE_VERSION && hooks.structSize >= sizeof(GakuHookService) &&
+                        hooks.acquire && hooks.release)
+                    {
+                        hookService_ = hooks;
+                        hookServiceCached_ = true;
+                    }
+                    CheckGakuMotionUnavailableLocked(&unavailableMsg);
+                    logCopy = logService_;
+                }
+                else
+                {
+                    hostApi_ = {};
+                    hostApiSet_ = false;
+                    logService_ = {};
+                    mainThreadService_ = {};
+                }
             }
+            if (!unavailableMsg.empty() && logCopy.write)
+                logCopy.write(logCopy.context, GAKU_LOG_INFO, unavailableMsg.c_str());
         }
 
         void InitializeWorker()
@@ -487,30 +504,45 @@ namespace ScreenshotManager
             if (overrideVal >= 0) return overrideVal != 0;
 
             GakuMotionStageStateServiceV1 svc{};
+            GakuLogService logCopy{};
+            std::string unavailableMsg;
+            bool skipStageState = false;
             {
                 std::lock_guard<std::mutex> lock(hostMutex_);
                 if (!hostApiSet_ || !hostApi_.queryService) return false;
                 if (!stageStateCached_)
                 {
-                    GakuMotionStageStateServiceV1 candidate{};
-                    const GakuStatus st = hostApi_.queryService(
-                        hostApi_.hostContext,
-                        GAKU_SERVICE_MOTION_STAGE_STATE,
-                        GAKU_MOTION_STAGE_STATE_VERSION,
-                        sizeof(candidate),
-                        &candidate);
-                    if (st == GAKU_OK &&
-                        candidate.abiVersion == GAKU_MOTION_STAGE_STATE_VERSION &&
-                        candidate.structSize >= sizeof(GakuMotionStageStateServiceV1) &&
-                        candidate.getState != nullptr)
+                    if (CheckGakuMotionUnavailableLocked(&unavailableMsg))
                     {
-                        stageStateService_ = candidate;
-                        stageStateCached_ = true;
+                        logCopy = logService_;
+                        skipStageState = true;
+                    }
+                    else
+                    {
+                        GakuMotionStageStateServiceV1 candidate{};
+                        const GakuStatus st = hostApi_.queryService(
+                            hostApi_.hostContext,
+                            GAKU_SERVICE_MOTION_STAGE_STATE,
+                            GAKU_MOTION_STAGE_STATE_VERSION,
+                            sizeof(candidate),
+                            &candidate);
+                        if (st == GAKU_OK &&
+                            candidate.abiVersion == GAKU_MOTION_STAGE_STATE_VERSION &&
+                            candidate.structSize >= sizeof(GakuMotionStageStateServiceV1) &&
+                            candidate.getState != nullptr)
+                        {
+                            stageStateService_ = candidate;
+                            stageStateCached_ = true;
+                        }
                     }
                 }
-                if (!stageStateCached_) return false;
-                svc = stageStateService_;
+                if (!skipStageState && stageStateCached_)
+                    svc = stageStateService_;
             }
+
+            if (!unavailableMsg.empty() && logCopy.write)
+                logCopy.write(logCopy.context, GAKU_LOG_INFO, unavailableMsg.c_str());
+            if (skipStageState || !svc.getState) return false;
 
             GakuMotionStageStateV1 state{};
             if (svc.getState(svc.context, &state) != GAKU_OK) return false;
@@ -2265,6 +2297,11 @@ namespace ScreenshotManager
         bool hostApiSet_{false};
         GakuLogService logService_{};
         GakuMainThreadService mainThreadService_{};
+        GakuPluginsServiceV1 pluginsService_{};
+        bool pluginsServiceCached_{false};
+        bool gakuMotionPluginsUnavailable_{false};
+        bool gakuMotionKnownUnavailable_{false};
+        bool gakuMotionUnavailableLogged_{false};
         GakuMotionStageStateServiceV1 stageStateService_{};
         bool stageStateCached_{false};
         GakuHookService hookService_{};
@@ -2300,27 +2337,122 @@ namespace ScreenshotManager
             return orig ? orig(sc, syncInterval, flags) : S_OK;
         }
 
-        bool QueryClockCaptureGuard(GakuMotionClockServiceV1& out)
+        static const char* PluginLoadStateName(GakuPluginLoadState state) noexcept
         {
-            std::lock_guard<std::mutex> lock(hostMutex_);
-            if (clockServiceCached_)
+            switch (state)
             {
-                out = clockService_;
+            case GAKU_PLUGIN_STATE_NOT_FOUND: return "not-found";
+            case GAKU_PLUGIN_STATE_DISABLED: return "disabled";
+            case GAKU_PLUGIN_STATE_DEPENDENCY_ERROR: return "dependency-error";
+            case GAKU_PLUGIN_STATE_INCOMPATIBLE: return "incompatible";
+            case GAKU_PLUGIN_STATE_QUERIED: return "queried";
+            case GAKU_PLUGIN_STATE_ACTIVATED: return "activated";
+            case GAKU_PLUGIN_STATE_RUNTIME_READY: return "runtime-ready";
+            case GAKU_PLUGIN_STATE_FAILED: return "failed";
+            default: return "unknown";
+            }
+        }
+
+        static bool IsUnavailablePluginState(GakuPluginLoadState state) noexcept
+        {
+            return state == GAKU_PLUGIN_STATE_NOT_FOUND ||
+                state == GAKU_PLUGIN_STATE_DISABLED ||
+                state == GAKU_PLUGIN_STATE_DEPENDENCY_ERROR ||
+                state == GAKU_PLUGIN_STATE_INCOMPATIBLE ||
+                state == GAKU_PLUGIN_STATE_FAILED;
+        }
+
+        bool CheckGakuMotionUnavailableLocked(std::string* outLogMessage)
+        {
+            if (gakuMotionKnownUnavailable_) return true;
+            if (gakuMotionPluginsUnavailable_ || !hostApiSet_ || !hostApi_.queryService)
+                return false;
+
+            if (!pluginsServiceCached_)
+            {
+                GakuPluginsServiceV1 plugins{};
+                const GakuStatus st = hostApi_.queryService(
+                    hostApi_.hostContext,
+                    GAKU_SERVICE_PLUGINS,
+                    GAKU_PLUGINS_SERVICE_VERSION,
+                    sizeof(plugins),
+                    &plugins);
+                if (st != GAKU_OK ||
+                    plugins.abiVersion != GAKU_PLUGINS_SERVICE_VERSION ||
+                    plugins.structSize < sizeof(GakuPluginsServiceV1) ||
+                    !plugins.findPlugin)
+                {
+                    gakuMotionPluginsUnavailable_ = true;
+                    return false;
+                }
+                pluginsService_ = plugins;
+                pluginsServiceCached_ = true;
+            }
+
+            GakuPluginSummaryV1 summary{};
+            const GakuStatus findSt = pluginsService_.findPlugin("gakumotion", sizeof(summary), &summary);
+            if (findSt != GAKU_OK ||
+                summary.abiVersion != GAKU_PLUGINS_SERVICE_VERSION ||
+                summary.structSize < sizeof(GakuPluginSummaryV1))
+            {
+                return false;
+            }
+
+            if (IsUnavailablePluginState(summary.state))
+            {
+                gakuMotionKnownUnavailable_ = true;
+                if (!gakuMotionUnavailableLogged_ && outLogMessage)
+                {
+                    gakuMotionUnavailableLogged_ = true;
+                    char buf[256]{};
+                    std::snprintf(buf, sizeof(buf),
+                        "[ScreenshotManager] GakuMotion unavailable (state=%s); skipping gakumotion service queries",
+                        PluginLoadStateName(summary.state));
+                    *outLogMessage = buf;
+                }
                 return true;
             }
-            if (!hostApiSet_ || !hostApi_.queryService) return false;
-            GakuMotionClockServiceV1 svc{};
-            if (hostApi_.queryService(hostApi_.hostContext, GAKU_SERVICE_MOTION_CLOCK,
-                    GAKU_MOTION_CLOCK_VERSION, sizeof(svc), &svc) != GAKU_OK)
-                return false;
-            if (svc.abiVersion != GAKU_MOTION_CLOCK_VERSION ||
-                svc.structSize < offsetof(GakuMotionClockServiceV1, endOffscreenCapture) + sizeof(svc.endOffscreenCapture) ||
-                !svc.beginOffscreenCapture || !svc.endOffscreenCapture)
-                return false;
-            clockService_ = svc;
-            clockServiceCached_ = true;
-            out = svc;
-            return true;
+            return false;
+        }
+
+        bool QueryClockCaptureGuard(GakuMotionClockServiceV1& out)
+        {
+            GakuLogService logCopy{};
+            std::string unavailableMsg;
+            bool ok = false;
+            {
+                std::lock_guard<std::mutex> lock(hostMutex_);
+                if (clockServiceCached_)
+                {
+                    out = clockService_;
+                    return true;
+                }
+                if (hostApiSet_ && hostApi_.queryService)
+                {
+                    if (CheckGakuMotionUnavailableLocked(&unavailableMsg))
+                    {
+                        logCopy = logService_;
+                    }
+                    else
+                    {
+                        GakuMotionClockServiceV1 svc{};
+                        if (hostApi_.queryService(hostApi_.hostContext, GAKU_SERVICE_MOTION_CLOCK,
+                                GAKU_MOTION_CLOCK_VERSION, sizeof(svc), &svc) == GAKU_OK &&
+                            svc.abiVersion == GAKU_MOTION_CLOCK_VERSION &&
+                            svc.structSize >= offsetof(GakuMotionClockServiceV1, endOffscreenCapture) + sizeof(svc.endOffscreenCapture) &&
+                            svc.beginOffscreenCapture && svc.endOffscreenCapture)
+                        {
+                            clockService_ = svc;
+                            clockServiceCached_ = true;
+                            out = svc;
+                            ok = true;
+                        }
+                    }
+                }
+            }
+            if (!unavailableMsg.empty() && logCopy.write)
+                logCopy.write(logCopy.context, GAKU_LOG_INFO, unavailableMsg.c_str());
+            return ok;
         }
 
         void BeginOffscreenCaptureIfAvailable()

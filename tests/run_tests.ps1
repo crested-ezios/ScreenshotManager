@@ -68,3 +68,10 @@ if ($LASTEXITCODE -ne 0) { throw "test_screenshot_manager compile failed" }
 
 & $exe
 if ($LASTEXITCODE -ne 0) { throw "test_screenshot_manager failed" }
+
+$contractCheck = Join-Path $repo 'tools\check_contract_headers.ps1'
+if (Test-Path -LiteralPath $contractCheck -PathType Leaf) {
+    $global:LASTEXITCODE = 0
+    & $contractCheck -RepoRoot $repo
+    if ($LASTEXITCODE -ne 0) { throw "check_contract_headers failed" }
+}

@@ -7,6 +7,7 @@
 #endif
 
 #include "../include/GakuPlugin.h"
+#include "../include/GakuPluginMetadata.h"
 #include "../include/GakuPaths.h"
 #include "../include/GakuScreenshot.h"
 #include "../include/GakuWebPanel.h"
@@ -87,6 +88,9 @@ namespace
         std::string registeredHotkeyDisplay;
         bool hotkeyUnregistered{false};
         std::vector<std::string> logs;
+        bool exposePluginsService{false};
+        uint32_t stageStateQueryCount{0};
+        static inline GakuPluginLoadState s_gakuMotionState{GAKU_PLUGIN_STATE_NOT_FOUND};
 
         static FakeHost* FromCtx(void* ctx) { return static_cast<FakeHost*>(ctx); }
 
@@ -181,6 +185,48 @@ namespace
             return GAKU_OK;
         }
 
+        static GakuStatus PluginsGetHostInfo(uint32_t outputSize, GakuHostInfoV1* output)
+        {
+            if (!output) return GAKU_E_INVALID_ARGUMENT;
+            if (outputSize < sizeof(GakuHostInfoV1)) return GAKU_E_SIZE;
+            GakuHostInfoV1 info{};
+            info.abiVersion = GAKU_PLUGINS_SERVICE_VERSION;
+            info.structSize = sizeof(GakuHostInfoV1);
+            info.pluginAbiVersion = GAKU_ABI_VERSION;
+            info.pluginCount = 1u;
+            std::snprintf(info.loaderVersion, sizeof(info.loaderVersion), "%s", GAKU_LOADER_VERSION);
+            *output = info;
+            return GAKU_OK;
+        }
+
+        static GakuStatus PluginsFindPlugin(const char* pluginId, uint32_t outputSize, GakuPluginSummaryV1* output)
+        {
+            if (!pluginId || !output) return GAKU_E_INVALID_ARGUMENT;
+            if (outputSize < sizeof(GakuPluginSummaryV1)) return GAKU_E_SIZE;
+            GakuPluginSummaryV1 summary{};
+            summary.abiVersion = GAKU_PLUGINS_SERVICE_VERSION;
+            summary.structSize = sizeof(GakuPluginSummaryV1);
+            summary.state = (std::strcmp(pluginId, "gakumotion") == 0)
+                ? s_gakuMotionState
+                : GAKU_PLUGIN_STATE_NOT_FOUND;
+            if (std::strcmp(pluginId, "gakumotion") == 0)
+            {
+                summary.hasMetadata = 1u;
+                std::snprintf(summary.id, sizeof(summary.id), "%s", "gakumotion");
+                std::snprintf(summary.name, sizeof(summary.name), "%s", "GakuMotion");
+                std::snprintf(summary.version, sizeof(summary.version), "%s", "0.1.1");
+            }
+            *output = summary;
+            return GAKU_OK;
+        }
+
+        static GakuStatus PluginsGetPluginAt(uint32_t, uint32_t outputSize, GakuPluginSummaryV1* output)
+        {
+            if (!output) return GAKU_E_INVALID_ARGUMENT;
+            if (outputSize < sizeof(GakuPluginSummaryV1)) return GAKU_E_SIZE;
+            return GAKU_E_INVALID_ARGUMENT;
+        }
+
         static GakuStatus QueryService(void* ctx, const char* name,
             uint32_t requestedVersion, uint32_t outputSize, void* output)
         {
@@ -237,8 +283,17 @@ namespace
                 std::memcpy(output, &tbl, sizeof(tbl));
                 return GAKU_OK;
             }
+            if (std::strcmp(name, GAKU_SERVICE_PLUGINS) == 0 && h->exposePluginsService)
+            {
+                if (outputSize < sizeof(GakuPluginsServiceV1)) return GAKU_E_SIZE;
+                GakuPluginsServiceV1 tbl{GAKU_PLUGINS_SERVICE_VERSION, sizeof(GakuPluginsServiceV1),
+                    &PluginsGetHostInfo, &PluginsFindPlugin, &PluginsGetPluginAt};
+                std::memcpy(output, &tbl, sizeof(tbl));
+                return GAKU_OK;
+            }
             if (std::strcmp(name, GAKU_SERVICE_MOTION_STAGE_STATE) == 0)
             {
+                ++h->stageStateQueryCount;
                 if (outputSize < sizeof(GakuMotionStageStateServiceV1)) return GAKU_E_SIZE;
                 GakuMotionStageStateServiceV1 tbl{GAKU_MOTION_STAGE_STATE_VERSION,
                     sizeof(GakuMotionStageStateServiceV1), h, &GetMotionStageState};
@@ -1122,6 +1177,69 @@ namespace
         Check(desc.activate && desc.onRuntimeReady && desc.onTick && desc.shutdown,
             "Plugin lifecycle callbacks populated");
 
+        auto queryMetaFn = reinterpret_cast<FnGakuPlugin_QueryMetadata>(
+            GetProcAddress(mod, "GakuPlugin_QueryMetadata"));
+        Check(queryMetaFn != nullptr, "GakuPlugin_QueryMetadata exported");
+        if (queryMetaFn)
+        {
+            GakuPluginMetadataV1 meta{};
+            Check(queryMetaFn(99u, sizeof(meta), &meta) == GAKU_E_VERSION,
+                "QueryMetadata rejects wrong ABI version");
+            Check(queryMetaFn(GAKU_METADATA_ABI_VERSION, sizeof(meta), nullptr) == GAKU_E_INVALID_ARGUMENT,
+                "QueryMetadata rejects null output");
+            Check(queryMetaFn(GAKU_METADATA_ABI_VERSION, 4u, &meta) == GAKU_E_SIZE,
+                "QueryMetadata rejects undersized output (4 bytes)");
+            Check(queryMetaFn(GAKU_METADATA_ABI_VERSION, sizeof(meta) - 1u, &meta) == GAKU_E_SIZE,
+                "QueryMetadata rejects undersized output (sizeof - 1)");
+            Check(queryMetaFn(GAKU_METADATA_ABI_VERSION, sizeof(meta), &meta) == GAKU_OK,
+                "GakuPlugin_QueryMetadata succeeds");
+            Check(meta.abiVersion == GAKU_METADATA_ABI_VERSION &&
+                meta.structSize == sizeof(GakuPluginMetadataV1),
+                "Metadata ABI version and structSize match");
+            Check(meta.originalAuthor && std::string(meta.originalAuthor) == "ScreenshotManager Contributors" &&
+                meta.maintainerCount == 1u && meta.maintainers && meta.maintainers[0] &&
+                std::string(meta.maintainers[0]) == "crested-ezios" &&
+                meta.subVersion && std::string(meta.subVersion).empty() &&
+                meta.releaseChannel && std::string(meta.releaseChannel) == "stable",
+                "Metadata author, maintainers, subVersion, and releaseChannel match");
+            Check(meta.summary &&
+                std::string(meta.summary) == "Multi-resolution offscreen screenshot capture and ACES green-screen matte plugin for GakuLoader." &&
+                meta.license && std::string(meta.license) == "MIT" &&
+                meta.minLoaderVersion && std::string(meta.minLoaderVersion) == "1.1.0",
+                "Metadata summary, license, and minLoaderVersion match");
+            Check(meta.repositoryUrl &&
+                std::string(meta.repositoryUrl) == "https://github.com/crested-ezios/ScreenshotManager" &&
+                meta.releaseUrl &&
+                std::string(meta.releaseUrl) == "https://github.com/crested-ezios/ScreenshotManager/releases" &&
+                meta.issuesUrl &&
+                std::string(meta.issuesUrl) == "https://github.com/crested-ezios/ScreenshotManager/issues",
+                "Metadata repository/release/issues URLs match");
+            bool hasEn = false, hasZhHans = false, hasZhHant = false, hasJa = false;
+            if (meta.localizedSummaries && meta.localizedSummaryCount == 4u)
+            {
+                for (uint32_t i = 0; i < meta.localizedSummaryCount; ++i)
+                {
+                    const auto& item = meta.localizedSummaries[i];
+                    if (!item.languageTag || !item.text || !item.text[0]) continue;
+                    const std::string tag(item.languageTag);
+                    if (tag == "en") hasEn = (std::string(item.text) == meta.summary);
+                    else if (tag == "zh-Hans") hasZhHans = true;
+                    else if (tag == "zh-Hant") hasZhHant = true;
+                    else if (tag == "ja") hasJa = true;
+                }
+            }
+            Check(hasEn && hasZhHans && hasZhHant && hasJa,
+                "Metadata localizedSummaries include en, zh-Hans, zh-Hant, ja");
+            Check(meta.dependencyCount == 1u && meta.dependencies &&
+                meta.dependencies[0].pluginId && std::string(meta.dependencies[0].pluginId) == "gakumotion" &&
+                meta.dependencies[0].displayName && std::string(meta.dependencies[0].displayName) == "GakuMotion" &&
+                meta.dependencies[0].versionRange && std::string(meta.dependencies[0].versionRange) == ">=0.1.1" &&
+                meta.dependencies[0].kind == GAKU_DEPENDENCY_OPTIONAL &&
+                meta.dependencies[0].reserved == 0u &&
+                meta.auxiliaryDllCount == 0u && meta.auxiliaryDlls == nullptr,
+                "Metadata declares optional gakumotion >=0.1.1 dependency and no auxiliary DLLs");
+        }
+
         const std::filesystem::path dir = MakeTempTestDir(L"DllHost");
         FakeHost host;
         host.localRoot = dir;
@@ -1509,6 +1627,98 @@ namespace
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
     }
+
+    void TestGakuLoaderPluginsAwareness()
+    {
+        BeginTest("gakuloader.plugins Runtime Binding Awareness & Lazy Fallback");
+        using ScreenshotManager::ScreenshotEngine;
+
+        auto countUnavailableLogs = [](const FakeHost& host) -> int {
+            int count = 0;
+            for (const auto& msg : host.logs)
+            {
+                if (msg.find("GakuMotion unavailable") != std::string::npos) ++count;
+            }
+            return count;
+        };
+
+        // 1. Absent gakuloader.plugins (older host): keeps full lazy fallback to gakumotion.stage-state/v1
+        {
+            FakeHost host;
+            host.exposePluginsService = false;
+            host.greenScreenActive = 1u;
+            const GakuHostApi api = host.MakeApi();
+
+            ScreenshotEngine engine;
+            engine.SetHostApi(&api);
+            GakuScreenshotCapabilitiesV1 caps{};
+            Check(engine.GetCapabilities(&caps) == GAKU_OK && caps.greenScreenDetected == 1u,
+                "Absent gakuloader.plugins falls back to lazy gakumotion.stage-state/v1 query");
+            Check(host.stageStateQueryCount == 1u && countUnavailableLogs(host) == 0,
+                "Absent gakuloader.plugins queried gakumotion.stage-state/v1 once with no unavailable log");
+            engine.Shutdown();
+        }
+
+        // 2. gakuloader.plugins reports gakumotion disabled: logs once and skips gakumotion.stage-state/v1
+        {
+            FakeHost host;
+            host.exposePluginsService = true;
+            host.greenScreenActive = 1u;
+            FakeHost::s_gakuMotionState = GAKU_PLUGIN_STATE_DISABLED;
+            const GakuHostApi api = host.MakeApi();
+
+            ScreenshotEngine engine;
+            engine.SetHostApi(&api);
+            GakuScreenshotCapabilitiesV1 caps{};
+            Check(engine.GetCapabilities(&caps) == GAKU_OK && caps.greenScreenDetected == 0u,
+                "Disabled gakumotion via gakuloader.plugins yields greenScreenDetected=0");
+            Check(engine.GetCapabilities(&caps) == GAKU_OK && caps.greenScreenDetected == 0u,
+                "Repeated GetCapabilities remains greenScreenDetected=0");
+            Check(host.stageStateQueryCount == 0u && countUnavailableLogs(host) == 1,
+                "Disabled gakumotion skips gakumotion.stage-state/v1 and logs once cleanly");
+            engine.Shutdown();
+        }
+
+        // 3. gakuloader.plugins reports queried at Activate, then transitions to failed before GetCapabilities
+        {
+            FakeHost host;
+            host.exposePluginsService = true;
+            host.greenScreenActive = 1u;
+            FakeHost::s_gakuMotionState = GAKU_PLUGIN_STATE_QUERIED;
+            const GakuHostApi api = host.MakeApi();
+
+            ScreenshotEngine engine;
+            engine.SetHostApi(&api);
+            Check(countUnavailableLogs(host) == 0,
+                "Queried gakumotion at SetHostApi does not emit unavailable log prematurely");
+
+            FakeHost::s_gakuMotionState = GAKU_PLUGIN_STATE_FAILED;
+            GakuScreenshotCapabilitiesV1 caps{};
+            Check(engine.GetCapabilities(&caps) == GAKU_OK && caps.greenScreenDetected == 0u,
+                "Failed gakumotion detected lazily skips gakumotion.stage-state/v1");
+            Check(host.stageStateQueryCount == 0u && countUnavailableLogs(host) == 1,
+                "Failed gakumotion logs once and avoids querying gakumotion.stage-state/v1");
+            engine.Shutdown();
+        }
+
+        // 4. gakuloader.plugins reports gakumotion activated: proceeds to query gakumotion.stage-state/v1
+        {
+            FakeHost host;
+            host.exposePluginsService = true;
+            host.greenScreenActive = 1u;
+            FakeHost::s_gakuMotionState = GAKU_PLUGIN_STATE_ACTIVATED;
+            const GakuHostApi api = host.MakeApi();
+
+            ScreenshotEngine engine;
+            engine.SetHostApi(&api);
+            GakuScreenshotCapabilitiesV1 caps{};
+            Check(engine.GetCapabilities(&caps) == GAKU_OK && caps.greenScreenDetected == 1u,
+                "Activated gakumotion proceeds to gakumotion.stage-state/v1");
+            Check(host.stageStateQueryCount == 1u && countUnavailableLogs(host) == 0,
+                "Activated gakumotion queries gakumotion.stage-state/v1 once without unavailable log");
+            engine.Shutdown();
+        }
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -1521,6 +1731,7 @@ int main(int argc, char** argv)
     TestSwapchainPresentCaptureStateMachine();
     TestCameraRenderBottomUpOrientation();
     TestWebPanelBridge();
+    TestGakuLoaderPluginsAwareness();
 
     std::filesystem::path dllPath;
     if (argc > 1 && argv[1] && argv[1][0])

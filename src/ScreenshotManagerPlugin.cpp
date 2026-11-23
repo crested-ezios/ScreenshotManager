@@ -7,6 +7,7 @@
 #endif
 
 #include "../include/GakuPlugin.h"
+#include "../include/GakuPluginMetadata.h"
 #include "../include/GakuPaths.hpp"
 #include "../include/GakuScreenshot.h"
 #include "../include/GakuWebPanel.h"
@@ -665,5 +666,52 @@ extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_Query(
     desc.onTick = &OnTick;
     desc.shutdown = &Shutdown;
     *output = desc;
+    return GAKU_OK;
+}
+
+extern "C" GAKU_PLUGIN_EXPORT GakuStatus GakuPlugin_QueryMetadata(
+    uint32_t requestedAbi, uint32_t outputSize, GakuPluginMetadataV1* output)
+{
+    if (requestedAbi != GAKU_METADATA_ABI_VERSION) return GAKU_E_VERSION;
+    if (!output) return GAKU_E_INVALID_ARGUMENT;
+    if (outputSize < sizeof(GakuPluginMetadataV1)) return GAKU_E_SIZE;
+
+    static const char* const kMaintainers[] = {"crested-ezios"};
+    static const GakuPluginLocalizedTextV1 kLocalizedSummaries[] = {
+        {"en", "Multi-resolution offscreen screenshot capture and ACES green-screen matte plugin for GakuLoader."},
+        {"zh-Hans", "适用于 GakuLoader 的多分辨率离屏截图与 ACES 绿幕抠像插件。"},
+        {"zh-Hant", "適用於 GakuLoader 的多解析度離屏截圖與 ACES 綠幕去背外掛。"},
+        {"ja", "GakuLoader 向けのマルチ解像度オフスクリーン撮影および ACES グリーンスクリーン透過プラグイン。"},
+    };
+    static const GakuPluginDependencyV1 kDependencies[] = {
+        {"gakumotion", "GakuMotion", ">=0.1.1", GAKU_DEPENDENCY_OPTIONAL, 0u},
+    };
+
+    const GakuPluginMetadataV1 metadata{
+        GAKU_METADATA_ABI_VERSION,
+        sizeof(GakuPluginMetadataV1),
+        "ScreenshotManager Contributors",
+        static_cast<uint32_t>(std::size(kMaintainers)),
+        0u,
+        kMaintainers,
+        "",
+        "stable",
+        "Multi-resolution offscreen screenshot capture and ACES green-screen matte plugin for GakuLoader.",
+        static_cast<uint32_t>(std::size(kLocalizedSummaries)),
+        0u,
+        kLocalizedSummaries,
+        "https://github.com/crested-ezios/ScreenshotManager",
+        "https://github.com/crested-ezios/ScreenshotManager/releases",
+        "https://github.com/crested-ezios/ScreenshotManager/issues",
+        "MIT",
+        "1.1.0",
+        static_cast<uint32_t>(std::size(kDependencies)),
+        0u,
+        kDependencies,
+        0u,
+        0u,
+        nullptr,
+    };
+    *output = metadata;
     return GAKU_OK;
 }
